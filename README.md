@@ -1,80 +1,142 @@
 # QBO MCP Server
 
-A custom Model Context Protocol server that connects Claude Desktop directly to a
-QuickBooks Online company — full read **and** write access via the QBO API.
+A [Model Context Protocol](https://modelcontextprotocol.io) server that connects
+Claude Desktop directly to **QuickBooks Online** — full read **and** write access
+via the QBO API, across **multiple companies from a single connector**.
 
-Built following the *Build Your Own QBO MCP Server* SOP (Nerd Enterprises / 97 & Up).
+- **54 tools** — reports, the full transaction/entity set (invoices, bills,
+  estimates, sales receipts, journal entries, payments, deposits, purchase
+  orders, …), attachments, and a raw API escape hatch.
+- **Multi-company, one connector** — pick which company to run against at
+  runtime; no need for a separate connector per company.
+- **Write-safety gate** — writes never post to the wrong books (see
+  [SECURITY.md](SECURITY.md)).
 
-## Tools (16)
-
-**Read (9):** `get_profit_and_loss`, `get_balance_sheet`, `get_cash_flow`,
-`get_aged_receivables`, `get_aged_payables`, `get_invoices`, `get_overdue_invoices`,
-`query`, `get_company_info`
-
-**Write (7 + 1 extended):** `create_customer`, `update_customer`, `create_item`,
-`create_invoice`, `create_bill`, `create_account`, `send_invoice_email`,
-`import_transactions_from_csv`
+> ⚠️ This talks to **real accounting data**. Read [SECURITY.md](SECURITY.md)
+> before you connect a production company. Secrets (`.env`, `tokens*.json`) are
+> git-ignored and must never be committed.
 
 ## Setup
 
-### 1. Install dependencies
+### 1. Install
 ```bash
-cd ~/Desktop/qbo-mcp-server
 npm install
 ```
 
-### 2. Fill in your keys (Step 7 of the SOP)
-Open `.env` and replace the placeholders with your Intuit Developer keys:
-```
-QBO_CLIENT_ID=...
-QBO_CLIENT_SECRET=...
-QBO_REDIRECT_URI=http://localhost:3000/callback
-QBO_ENVIRONMENT=sandbox
-```
-> The redirect URI must match exactly what you registered in the developer portal (Step 5).
-> Never commit `.env` or `tokens.json` — they're already git-ignored.
-
-### 3. Authorize QuickBooks (one time)
+### 2. Configure keys
 ```bash
-npm run connect
+cp .env.example .env
 ```
-A browser opens → log in with your Intuit credentials → **Allow**. Tokens are saved to
-`tokens.json` and auto-refresh for ~100 days. Re-run this command any time you need to
-re-authorize or switch companies.
+Fill in your Intuit Developer app's `QBO_CLIENT_ID` / `QBO_CLIENT_SECRET`
+(from https://developer.intuit.com → your app → Keys & OAuth). The
+`QBO_REDIRECT_URI` must match a redirect URI registered on the app exactly.
 
-### 4. Connect to Claude Desktop (Step 8)
-Merge `claude_desktop_config.snippet.json` into your Claude Desktop config at:
-```
-~/Library/Application Support/Claude/claude_desktop_config.json
-```
-Then fully quit and reopen Claude Desktop. The `qbo` server appears under
-**Settings → Connectors**.
-
-## Multiple companies (accounting files)
-
-Each company gets its own token file, selected by the `QBO_COMPANY` env var:
-
-- Unset → `tokens.json` (original single-company behavior).
-- `QBO_COMPANY=8315` → `tokens.8315.json`.
-
-**Add a company:**
+### 3. Authorize a company (one time each)
 ```bash
-QBO_COMPANY=<name> npm run connect      # authorize → writes tokens.<name>.json
-```
-Then add a connector per company in your Claude Desktop config (see
-`claude_desktop_config.snippet.json`), each with its own `QBO_COMPANY` in `env`.
-Restart Claude Desktop — every company shows up as its own connector (`qbo-8315`,
-`qbo-db2f`, …), all usable at once.
+# Unified multi-company setup — give each company a short slug:
+QBO_COMPANY=<slug> npm run connect      # writes tokens.<slug>.json
 
-> A **production** company needs its own keys: add `QBO_ENVIRONMENT=production`,
-> `QBO_CLIENT_ID`, `QBO_CLIENT_SECRET` to that connector's `env` block. Values in the
-> Claude Desktop config override `.env`, so per-company overrides work cleanly.
+# Or a single default company:
+npm run connect                          # writes tokens.json
+```
+A browser opens → log in to the QuickBooks company → **Allow**. Tokens are saved
+locally and auto-refresh (~100 days).
+
+The easiest way to add companies is the bundled **`add-qbo-company` skill** (see
+below) — it runs the connect flow, registers the connector, and validates both.
+
+### 4. Connect to Claude Desktop
+Add one server entry pointing at `src/index.js` to your Claude Desktop config at
+`~/Library/Application Support/Claude/claude_desktop_config.json`. For the
+unified multi-company setup, use a single entry **without** `QBO_COMPANY`:
+```json
+{
+  "mcpServers": {
+    "qbo": {
+      "command": "/absolute/path/to/node",
+      "args": ["/absolute/path/to/qbo-mcp-server/src/index.js"]
+    }
+  }
+}
+```
+Fully **quit and reopen** Claude Desktop. `qbo` appears under
+**Settings → Connectors** with all 54 tools.
+
+## Multiple companies (one connector)
+
+Each company is a `tokens.<slug>.json` file. Within one connector you choose the
+company at runtime:
+
+- **`list_companies`** — see every connected company (slug, realm, environment).
+- **`select_company`** — set the active company for following calls.
+- **`get_active_company`** — check which is active.
+- Every tool also takes an optional **`company`** argument to override per call.
+
+Resolution precedence per call: *explicit `company` → session default → env
+`QBO_COMPANY` → sole company (reads only) → error listing choices.* Write tools
+never auto-pick — see [SECURITY.md](SECURITY.md).
+
+> Typical flow in Claude: *"list my companies"* → *"work on 8315"* → *"create a
+> journal entry: debit Accounting 500, credit Checking 500"*.
+
+### The `add-qbo-company` skill
+
+Bundled at [`.claude/skills/add-qbo-company/`](.claude/skills/add-qbo-company/).
+Invoke it in Claude Code with `/add-qbo-company` (or ask to "add another
+QuickBooks company"). It handles the three moving parts — **authorize**
+(browser login → token file), **register** (adds the connector to the Claude
+Desktop config, with backup + idempotent edits), and **verify** (cross-checks
+that a company is both authorized and registered) — with Python helpers
+(`scripts/list_companies.py`, `scripts/register_connector.py`) and a
+troubleshooting reference.
+
+## Tools (54)
+
+**Company selection (3):** `list_companies`, `select_company`, `get_active_company`
+
+**Reports & reads (15):** `get_profit_and_loss`, `get_balance_sheet`,
+`get_cash_flow`, `get_aged_receivables`, `get_aged_payables`, `get_invoices`,
+`get_overdue_invoices`, `query`, `get_company_info`, `get_general_ledger`,
+`get_trial_balance`, `get_transaction_list`, `get_transaction_list_by_vendor`,
+`get_transaction_list_by_customer`, `get_transaction_list_with_splits`
+
+**Core writes (8):** `create_customer`, `update_customer`, `create_item`,
+`create_invoice`, `create_bill`, `create_account`, `send_invoice_email`,
+`import_transactions_from_csv`
+
+**Journal entries (2):** `create_journal_entry`, `update_journal_entry`
+
+**Sales transactions (12):** `create_estimate`, `update_estimate`,
+`send_estimate`, `update_invoice`, `void_invoice`, `create_sales_receipt`,
+`update_sales_receipt`, `send_sales_receipt`, `create_credit_memo`,
+`create_refund_receipt`, `create_payment`, `create_deposit`
+
+**Purchases & vendors (8):** `create_expense`, `update_purchase`,
+`create_bill_item_based`, `update_bill`, `create_vendor_credit`,
+`create_purchase_order`, `create_vendor`, `update_vendor`
+
+**People & items (3):** `create_employee`, `create_time_activity`, `update_item`
+
+**Attachments & advanced (3):** `attach_file`, `get_attachments`, `api_request`
+
+> `api_request` is the escape hatch for anything not wrapped: pass a path under
+> `/v3/company/{realmId}` (e.g. `/reports/ProfitAndLossDetail?...`,
+> `/query?query=SELECT * FROM Bill`) and it handles auth, realm, and minorversion.
 
 ## Notes
-- All server logging goes to **stderr** — stdout is reserved for the MCP protocol.
-- `create_invoice` attaches lines to an existing Service item; if none exists, create one
-  first with `create_item`.
-- `import_transactions_from_csv` supports a `dry_run` preview; live posting is wired for
-  `Expense` (QBO `Purchase`) transactions via the batch API.
-- Sandbox starts empty — seed a few customers/invoices/bills in QBO before expecting read
-  tools to return data.
+
+- Line-item tools accept account/item/customer references by **name or Id**.
+- Item-based tools (purchase orders, item-based bills) need **purchasable**
+  items (ones with an expense account).
+- `import_transactions_from_csv` supports a `dry_run` preview; live posting is
+  wired for `Expense` (QBO `Purchase`) via the batch API.
+- Sandbox companies start empty — seed some data before expecting reads to return
+  rows.
+- All logging goes to **stderr**; stdout is the MCP protocol channel.
+
+## Architecture
+
+- `src/qbo.js` — OAuth (authorize / refresh), per-company token resolution,
+  authenticated request + multipart upload helpers, company discovery.
+- `src/index.js` — the MCP server: tool definitions, company-resolution +
+  write-gate, line-item builders.
