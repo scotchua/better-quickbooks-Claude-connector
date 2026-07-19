@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "qbo-8315": {
+      "command": "/Users/isaaccruzperdomo/.nvm/versions/node/v24.14.0/bin/node",
+      "args": ["/Users/isaaccruzperdomo/Desktop/qbo-mcp-server/src/index.js"],
+      "env": { "QBO_COMPANY": "8315" }
+    },
+    "qbo-db2f": {
+      "command": "/Users/isaaccruzperdomo/.nvm/versions/node/v24.14.0/bin/node",
+      "args": ["/Users/isaaccruzperdomo/Desktop/qbo-mcp-server/src/index.js"],
+      "env": { "QBO_COMPANY": "db2f" }
+    }
+  }
+}

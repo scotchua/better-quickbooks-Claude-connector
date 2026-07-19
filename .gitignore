@@ -1,0 +1,11 @@
+node_modules/
+
+# Secrets — never commit
+.env
+tokens*.json
+
+# Generated output / scratch
+save-excels-here/
+*.log
+*.mjs
+.DS_Store
