@@ -16,7 +16,77 @@ via the QBO API, across **multiple companies from a single connector**.
 > before you connect a production company. Secrets (`.env`, `tokens*.json`) are
 > git-ignored and must never be committed.
 
-## Setup
+## Step-by-step setup (no coding experience needed)
+
+This takes about 20 minutes. You will copy and paste a few commands. You do not
+need to understand them — just follow along in order.
+
+**Before you start, you need:**
+- A Mac.
+- The QuickBooks Online login for the company you want to connect.
+- [Claude Desktop](https://claude.ai/download) installed.
+- About 20 minutes.
+
+**Step 1 — Install Node (the engine this app runs on).**
+Go to [nodejs.org](https://nodejs.org), click the big button that says **LTS**,
+and run the file it downloads. Click "Continue" until it finishes.
+
+**Step 2 — Download this project.**
+On this page, click the green **Code** button, then **Download ZIP**. Open the
+downloaded file to unzip it, and drag the `qbo-mcp-server` folder onto your
+Desktop.
+
+**Step 3 — Open the Terminal app.**
+Press `Cmd + Space`, type `Terminal`, and press Enter. A window with a blinking
+cursor opens. This is where you paste commands. Paste this one and press Enter:
+```bash
+cd ~/Desktop/qbo-mcp-server && npm install
+```
+This moves into the folder and downloads the parts the app needs. Wait for it to
+finish (a minute or two).
+
+**Step 4 — Get your QuickBooks keys.**
+The app needs two secret keys from Intuit (the company that makes QuickBooks) so
+it can talk to your books.
+1. Go to [developer.intuit.com](https://developer.intuit.com) and sign in with
+   your Intuit account.
+2. Create a new app, and choose the **Accounting** scope.
+3. Find the **Keys & OAuth** page. Copy the **Client ID** and **Client Secret**.
+4. On that same page, add this exact **Redirect URI**:
+   `http://localhost:3000/callback`
+
+**Step 5 — Put your keys into the app.**
+In Terminal, paste this and press Enter to make your settings file:
+```bash
+cp .env.example .env && open -e .env
+```
+A text window opens. Paste your Client ID after `QBO_CLIENT_ID=` and your Client
+Secret after `QBO_CLIENT_SECRET=`. Save (`Cmd + S`) and close the window.
+
+**Step 6 — Connect a company.**
+Pick a short nickname for the company (letters/numbers only, e.g. `acme`). Paste
+this, replacing `acme` with your nickname:
+```bash
+QBO_COMPANY=acme npm run connect
+```
+Your web browser opens. Log in to the QuickBooks company and click **Allow**.
+When you see "✅ QuickBooks connected," close that browser tab. Repeat this step
+for each company you want to add (use a different nickname each time).
+
+**Step 7 — Tell Claude Desktop about the app.**
+The easiest way is to let Claude do it for you: open **Claude Code** and type
+`/add-qbo-company`, then follow the prompts. It sets everything up and checks it
+worked. (If you'd rather do it by hand, see *Setup (quick reference)* below.)
+
+**Step 8 — Restart Claude Desktop.**
+Quit Claude Desktop completely (`Cmd + Q`), then open it again. Your companies now
+appear, and you can ask things like *"list my QuickBooks companies"* or *"show me
+last month's profit and loss for acme."*
+
+Stuck on a step? See
+[the troubleshooting guide](.claude/skills/add-qbo-company/references/troubleshooting.md).
+
+## Setup (quick reference)
 
 ### 1. Install
 ```bash

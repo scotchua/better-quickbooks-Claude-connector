@@ -1,64 +1,76 @@
-# Security
+# Security — Questions and Answers
 
-This server holds the keys to real accounting data — OAuth tokens that can read
-and **write** to live QuickBooks Online books. These are the decisions that keep
-it safe, and what you must do to keep it that way.
+This app can read and change real QuickBooks data. That is a big deal. Here are
+the common safety questions, answered in plain words.
 
-## Secrets never enter git
+## What secret things does this app keep?
 
-The following are git-ignored (see `.gitignore`) and must **never** be committed:
+Two kinds:
 
-| File | Contains |
-|------|----------|
-| `.env` | Intuit app Client ID + Secret |
-| `tokens.json`, `tokens.<slug>.json` | Live OAuth **access + refresh tokens** per company |
-| `tokens.sandbox-backup.json` | A token backup |
-| `save-excels-here/` | Exported financial data (P&L, etc.) |
-| `node_modules/` | Dependencies (restored via `npm install`) |
+- **Your keys** — the Client ID and Secret from Intuit. They live in a file
+  called `.env`.
+- **Your tokens** — special passes that let the app open your books without your
+  password each time. They live in files named `tokens.json` or
+  `tokens.<nickname>.json`, one per company.
 
-The ignore rule for tokens is `tokens*.json` — a wildcard, deliberately, so that
-**every** company's token file is covered, not just the legacy `tokens.json`. If
-you clone this repo, you start with no secrets; you supply your own via
-`.env` (copy from `.env.example`) and `npm run connect`.
+Anyone who gets these could reach your books. So we keep them off the internet.
 
-If a token or key is ever committed by accident, treat it as compromised:
-rotate the Intuit app secret in the developer portal and re-run `npm run connect`
-to mint fresh tokens (which invalidates continued use of the leaked refresh token
-once it rotates).
+## Are these secrets shared when I put the code online?
 
-## Per-company isolation
+No. The app has a list called `.gitignore`. Files on that list are never saved to
+GitHub. The list includes `.env` and **every** token file (the rule is
+`tokens*.json`, which covers all of them, not just one). Your exported reports
+folder and other extras are on the list too.
 
-Each QuickBooks company is a separate `tokens.<slug>.json` file. Token loading is
-resolved **per request** from the company slug — one company's tokens are never
-used for another. The API host (sandbox vs production) is derived from each
-token file's stored `environment`, so companies in different environments can't
-cross-route.
+When someone downloads this project, they get **no** secrets. They add their own
+keys and connect their own QuickBooks.
 
-## Write-safety gate
+## What if a secret gets shared by mistake?
 
-The server exposes write tools (invoices, bills, journal entries, payments,
-deletes/voids). To prevent a transaction from posting to the wrong books:
+Treat it like a lost house key: change the locks.
 
-- Every tool takes an optional `company` argument. Resolution precedence is:
-  **explicit `company` → session default (`select_company`) → `QBO_COMPANY` env →
-  the sole company (reads only) → error listing the choices.**
-- **Write tools never auto-pick a company.** With no explicit argument and no
-  session/env default, a write fails with a message listing the available
-  companies instead of guessing. Reads may fall back to the sole company for
-  convenience; writes may not.
+1. Go to the Intuit developer site and make a new Client Secret (this turns off
+   the old one).
+2. Run `npm run connect` again to get fresh tokens.
 
-## OAuth handling
+After that, the leaked secret no longer works.
 
-- Tokens auto-refresh ~60s before expiry; refresh tokens are valid ~100 days and
-  are rotated by Intuit on refresh (the new one is persisted).
-- The one-time authorization uses a CSRF `state` parameter validated on the
-  callback.
-- All server logging goes to **stderr** — stdout is reserved for the MCP protocol
-  — so tokens are never printed to the protocol channel.
+## Can one company's data mix with another company's?
 
-## Production vs sandbox
+No. Each company has its own token file. When the app makes a request, it picks
+the right file for that one company. It also knows whether each company is a test
+(sandbox) or a real (production) company, so requests can't go to the wrong place.
 
-`production` companies are **real books** — writes post for real. Sandbox
-companies are Intuit test data. Keep production credentials in `.env` (or a
-per-connector `env` override) and be deliberate about which company is active
-before running any write tool.
+## Can it change the wrong company's books by accident?
+
+We built a safety gate to stop that.
+
+- Every action can take a company name.
+- You can also set an active company first, so you don't repeat yourself.
+- For anything that **changes** your books (like making an invoice or a journal
+  entry), the app will **not guess** the company. If you didn't say which one, it
+  stops and asks. Only harmless "read" actions may assume the company when there
+  is just one.
+
+So a payment or invoice cannot quietly land in the wrong company.
+
+## Do the tokens expire?
+
+Yes, and that is good. The app refreshes them on its own before they run out. If
+they ever fully expire (about 100 days unused), you just run `npm run connect`
+again.
+
+## Could my tokens show up in a log or a screen somewhere?
+
+The app writes its notes to a hidden channel, not the main output. Your tokens
+are never printed where Claude or you would normally see them.
+
+## What is the difference between "sandbox" and "production"?
+
+- **Sandbox** = a fake, practice company from Intuit. Safe to play in. Nothing is
+  real.
+- **Production** = your real books. Changes here are real. Money, invoices, and
+  bills are the actual ones.
+
+Before you run any action that changes things, make sure you know which company
+is active — especially if it is a production one.
