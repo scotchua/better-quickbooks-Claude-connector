@@ -52,7 +52,8 @@ start. Here is **every** safety feature, in plain words.
 ### It all runs on your own computer
 
 This is the biggest one, and the foundation for the rest. This app is
-**local** — it lives on your Mac. There is **no website or cloud server in the
+**local** — it lives on your own computer (Mac or Windows). There is **no
+website or cloud server in the
 middle**, and nothing to sign up for. The app only ever talks straight to
 QuickBooks (Intuit). That means:
 
@@ -128,25 +129,35 @@ This takes about 20 minutes. You will copy and paste a few commands. You do not
 need to understand them — just follow along in order.
 
 **Before you start, you need:**
-- A Mac.
+- A **Mac or a Windows PC**.
 - The QuickBooks Online login for the company you want to connect.
 - [Claude Desktop](https://claude.ai/download) installed.
 - About 20 minutes.
 
 **Step 1 — Install Node (the engine this app runs on).**
 Go to [nodejs.org](https://nodejs.org), click the big button that says **LTS**,
-and run the file it downloads. Click "Continue" until it finishes.
+and run the file it downloads (a `.pkg` on Mac, a `.msi` on Windows). Click
+"Continue" / "Next" until it finishes.
 
 **Step 2 — Download this project.**
-On this page, click the green **Code** button, then **Download ZIP**. Open the
-downloaded file to unzip it, and drag the `qbo-mcp-server` folder onto your
-Desktop.
+On this page, click the green **Code** button, then **Download ZIP**. Unzip it
+(Mac: double-click it; Windows: right-click → **Extract All**), and put the
+`qbo-mcp-server` folder on your **Desktop**.
 
-**Step 3 — Open the Terminal app.**
-Press `Cmd + Space`, type `Terminal`, and press Enter. A window with a blinking
-cursor opens. This is where you paste commands. Paste this one and press Enter:
+**Step 3 — Open a command window.**
+- **Mac:** Press `Cmd + Space`, type `Terminal`, and press Enter.
+- **Windows:** Press the `Windows` key, type `PowerShell`, and press Enter.
+
+A window with a blinking cursor opens — this is where you paste commands. Paste
+the line **for your system** and press Enter:
+
+Mac:
 ```bash
 cd ~/Desktop/qbo-mcp-server && npm install
+```
+Windows (PowerShell):
+```powershell
+cd $HOME\Desktop\qbo-mcp-server; npm install
 ```
 This moves into the folder and downloads the parts the app needs. Wait for it to
 finish (a minute or two).
@@ -162,25 +173,37 @@ it can talk to your books.
    `http://localhost:3000/callback`
 
 **Step 5 — Put your keys into the app.**
-In Terminal, paste this and press Enter to make your settings file:
+Make your settings file and open it. Paste the line **for your system**:
+
+Mac:
 ```bash
 cp .env.example .env && open -e .env
 ```
+Windows (PowerShell):
+```powershell
+copy .env.example .env; notepad .env
+```
 A text window opens. Paste your Client ID after `QBO_CLIENT_ID=` and your Client
-Secret after `QBO_CLIENT_SECRET=`. Save (`Cmd + S`) and close the window.
+Secret after `QBO_CLIENT_SECRET=`. Save and close the window.
 
 **Step 6 — Connect a company.**
 Pick a short nickname for the company (letters/numbers only, e.g. `acme`). Paste
-this, replacing `acme` with your nickname:
+the line **for your system**, replacing `acme` with your nickname:
+
+Mac:
 ```bash
 QBO_COMPANY=acme npm run connect
+```
+Windows (PowerShell):
+```powershell
+$env:QBO_COMPANY="acme"; npm run connect
 ```
 Your web browser opens. Log in to the QuickBooks company and click **Allow**.
 When you see "✅ QuickBooks connected," close that browser tab. Repeat this step
 for each company you want to add (use a different nickname each time).
 
 **Adding many companies at once?** Use the batch tool — log in once, then just
-pick + Allow each company:
+pick + Allow each company. **Same command on Mac and Windows:**
 ```bash
 npm run connect:batch                 # keeps asking "add another?"
 npm run connect:batch -- --count 50   # or do a set number in a row
@@ -192,9 +215,13 @@ The easiest way is to let Claude do it for you: open **Claude Code** and type
 worked. (If you'd rather do it by hand, see *Setup (quick reference)* below.)
 
 **Step 8 — Restart Claude Desktop.**
-Quit Claude Desktop completely (`Cmd + Q`), then open it again. Your companies now
-appear, and you can ask things like *"list my QuickBooks companies"* or *"show me
-last month's profit and loss for acme."*
+- **Mac:** Quit Claude Desktop completely (`Cmd + Q`), then open it again.
+- **Windows:** Right-click the Claude icon in the **system tray** (bottom-right,
+  by the clock), choose **Quit**, then open it again. Just closing the window
+  isn't enough — it keeps running in the tray.
+
+Your companies now appear, and you can ask things like *"list my QuickBooks
+companies"* or *"show me last month's profit and loss for acme."*
 
 Stuck on a step? See
 [the troubleshooting guide](.claude/skills/add-qbo-company/references/troubleshooting.md).
@@ -233,15 +260,31 @@ The easiest way to add companies is the bundled **`add-qbo-company` skill** (see
 below) — it runs the connect flow, registers the connector, and validates both.
 
 ### 4. Connect to Claude Desktop
-Add one server entry pointing at `src/index.js` to your Claude Desktop config at
-`~/Library/Application Support/Claude/claude_desktop_config.json`. For the
-unified multi-company setup, use a single entry **without** `QBO_COMPANY`:
+Add one server entry pointing at `src/index.js` to your Claude Desktop config
+file. It lives at:
+- **Mac:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+
+For the unified multi-company setup, use a single entry **without** `QBO_COMPANY`.
+
+Mac:
 ```json
 {
   "mcpServers": {
     "qbo": {
       "command": "/absolute/path/to/node",
       "args": ["/absolute/path/to/qbo-mcp-server/src/index.js"]
+    }
+  }
+}
+```
+Windows (use `node.exe`, and **double** every backslash in JSON):
+```json
+{
+  "mcpServers": {
+    "qbo": {
+      "command": "C:\\Program Files\\nodejs\\node.exe",
+      "args": ["C:\\Users\\you\\Desktop\\qbo-mcp-server\\src\\index.js"]
     }
   }
 }
