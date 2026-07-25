@@ -387,6 +387,127 @@ async function getRealmId(company) {
   return tokens.realmId;
 }
 
+// Derive a short, stable, filesystem-safe slug from a realmId: the last 4 digits,
+// extended one digit at a time until it no longer collides with a taken slug.
+function deriveSlugFromRealm(realmId, taken = new Set()) {
+  const digits = String(realmId).replace(/\D/g, "");
+  for (let n = 4; n <= digits.length; n++) {
+    const s = digits.slice(-n);
+    if (!taken.has(s)) return s;
+  }
+  return digits || sanitizeSlug(String(realmId)) || "company";
+}
+
+// Exchange an authorization code for a token bundle (no realmId — that comes from
+// the callback query). Shared shape with runAuthorizationFlow's inline exchange.
+async function exchangeCodeForTokens(code, environment) {
+  const creds = credentials();
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    code,
+    redirect_uri: creds.redirectUri,
+  });
+  const res = await fetch(TOKEN_URL, {
+    method: "POST",
+    headers: {
+      Authorization: basicAuthHeader(creds),
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json",
+    },
+    body,
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error("Token exchange failed: " + JSON.stringify(data));
+  const now = Date.now();
+  return {
+    access_token: data.access_token,
+    refresh_token: data.refresh_token,
+    environment,
+    expires_at: now + data.expires_in * 1000,
+    refresh_expires_at: now + data.x_refresh_token_expires_in * 1000,
+  };
+}
+
+// Pattern A — sequential batch authorization on ONE persistent localhost listener.
+// The Intuit login session is reused across companies, so after the first login
+// each additional company is just pick-in-the-picker → Allow. `shouldContinue`
+// (async, receives the list connected so far) decides whether to authorize
+// another; return false to stop. A company whose realmId is already on disk is
+// refreshed in place under its existing slug instead of creating a duplicate.
+// The whole batch uses one environment (QBO_ENVIRONMENT); run separate batches
+// for sandbox vs production. Returns [{ slug, realmId, environment, reused }].
+async function runBatchAuthorization({ shouldContinue } = {}) {
+  const creds = credentials();
+  const environment = connectEnvironment();
+  const redirect = new URL(creds.redirectUri);
+  const port = Number(redirect.port) || 3000;
+
+  const connected = [];
+  let pending = null; // { state, resolve }
+
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, `http://localhost:${port}`);
+    if (url.pathname !== redirect.pathname) { res.writeHead(404).end("Not found"); return; }
+    if (!pending) { res.writeHead(409).end("No authorization in progress."); return; }
+    const code = url.searchParams.get("code");
+    const realmId = url.searchParams.get("realmId");
+    const returnedState = url.searchParams.get("state");
+    if (returnedState !== pending.state) { res.writeHead(400).end("State mismatch — close this tab and retry."); return; }
+    if (!code || !realmId) { res.writeHead(400).end("Missing code or realmId in callback."); return; }
+    res.writeHead(200, { "Content-Type": "text/html" }).end(
+      `<html><body style="font-family:sans-serif;padding:3rem;text-align:center">
+         <h2>✅ Connected (#${connected.length + 1})</h2>
+         <p>Return to your terminal — it will prompt for the next company or finish.</p>
+       </body></html>`
+    );
+    const p = pending; pending = null;
+    p.resolve({ code, realmId });
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, resolve);
+  });
+  log(`Batch authorize listening on ${creds.redirectUri} (${environment}).`);
+
+  try {
+    let go = true;
+    while (go) {
+      const state = randomBytes(16).toString("hex");
+      const authUrl =
+        `${AUTHORIZE_URL}?client_id=${encodeURIComponent(creds.clientId)}` +
+        `&response_type=code&scope=${encodeURIComponent(SCOPE)}` +
+        `&redirect_uri=${encodeURIComponent(creds.redirectUri)}&state=${state}`;
+
+      log(`\n[#${connected.length + 1}] Opening browser — pick the next company and click Allow.`);
+      log("If it doesn't open, use this URL:");
+      log("AUTHORIZE_URL>>> " + authUrl + " <<<");
+
+      const { code, realmId } = await new Promise((resolve) => {
+        pending = { state, resolve };
+        openBrowser(authUrl);
+      });
+
+      const tokens = { ...(await exchangeCodeForTokens(code, environment)), realmId };
+
+      // Reuse the existing slug if this realmId is already connected; else mint one.
+      const existing = await listCompanies();
+      const taken = new Set(existing.map((c) => c.slug).concat(connected.map((c) => c.slug)));
+      const already = existing.find((c) => String(c.realmId) === String(realmId));
+      const slug = already ? already.slug : deriveSlugFromRealm(realmId, taken);
+
+      await saveTokens(slug, tokens);
+      connected.push({ slug, realmId, environment: tokens.environment, reused: !!already });
+      log(`   → "${slug}"${already ? " (already existed — refreshed)" : ""} · realm ${realmId} · ${tokens.environment}`);
+
+      go = shouldContinue ? await shouldContinue(connected.slice()) : false;
+    }
+  } finally {
+    server.close();
+  }
+  return connected;
+}
+
 export {
   credentials,
   getValidTokens,
@@ -395,6 +516,8 @@ export {
   qboUpload,
   getRealmId,
   runAuthorizationFlow,
+  runBatchAuthorization,
+  deriveSlugFromRealm,
   listCompanies,
   sanitizeSlug,
   DEFAULT_COMPANY,

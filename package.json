@@ -6,7 +6,8 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "connect": "node src/index.js --connect"
+    "connect": "node src/index.js --connect",
+    "connect:batch": "node src/index.js --connect-batch"
   },
   "engines": {
     "node": ">=18"

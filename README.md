@@ -1,20 +1,126 @@
-# QBO MCP Server
+# Better QuickBooks Connector
 
-A [Model Context Protocol](https://modelcontextprotocol.io) server that connects
-Claude Desktop directly to **QuickBooks Online** — full read **and** write access
-via the QBO API, across **multiple companies from a single connector**.
+Connect Claude Desktop straight to **QuickBooks Online** — and work in **all your
+companies from one connector**, not one at a time. Read *and* write.
 
-- **54 tools** — reports, the full transaction/entity set (invoices, bills,
-  estimates, sales receipts, journal entries, payments, deposits, purchase
-  orders, …), attachments, and a raw API escape hatch.
-- **Multi-company, one connector** — pick which company to run against at
-  runtime; no need for a separate connector per company.
-- **Write-safety gate** — writes never post to the wrong books (see
-  [SECURITY.md](SECURITY.md)).
+Built on the [Model Context Protocol](https://modelcontextprotocol.io).
 
-> ⚠️ This talks to **real accounting data**. Read [SECURITY.md](SECURITY.md)
-> before you connect a production company. Secrets (`.env`, `tokens*.json`) are
-> git-ignored and must never be committed.
+## Who this is for
+
+This is for **accountants and bookkeepers** who use QuickBooks Online for more
+than one company and want Claude to help with real work — pulling reports,
+cleaning up the books, sending invoices, and entering transactions.
+
+The QuickBooks connector that comes built into Claude has two big limits:
+
+- It is **read-only.** It can look, but it cannot make an invoice, a bill, or a
+  journal entry.
+- It points at **one company at a time.** If you handle 5, 20, or 50 client
+  files, switching back and forth gets slow and clumsy.
+
+This tool fixes both:
+
+- **Many companies, one connector.** Connect all your client files once. Then
+  just tell Claude which one to use — *"work on Acme."* No switching connectors,
+  no restarts.
+- **Read *and* write.** Create invoices, bills, journal entries, and more — the
+  things you actually do in QuickBooks.
+- **54 tools** covering reports, transactions, lists, attachments, and a safe
+  bulk CSV import.
+
+You do **not** need to know how to code. The setup below is copy-and-paste.
+
+## What you can do
+
+- **Pull reports:** Profit & Loss, Balance Sheet, Cash Flow, Trial Balance,
+  General Ledger, A/R and A/P aging, overdue invoices.
+- **Enter and edit work:** customers, vendors, items, accounts, invoices, bills,
+  expenses, estimates, sales receipts, credit memos, payments, deposits, and
+  journal entries.
+- **Speed up month-end:** import a bank CSV (with a preview first), attach source
+  documents, and run collections.
+- **Work across clients:** switch between companies in one connector, or name one
+  per request.
+
+---
+
+## Security — what we did to keep your books safe
+
+This app can change **real** accounting data, so safety was built in from the
+start. Here is **every** safety feature, in plain words.
+
+### It all runs on your own computer
+
+This is the biggest one, and the foundation for the rest. This app is
+**local** — it lives on your Mac. There is **no website or cloud server in the
+middle**, and nothing to sign up for. The app only ever talks straight to
+QuickBooks (Intuit). That means:
+
+- Your keys and login passes **never leave your computer** (except to reach
+  QuickBooks itself). You never upload them, and you never share them with us or
+  any third party — there is no "us."
+- There is **no online service to break into.** No shared database of client
+  books sitting on someone else's server.
+- You are in full control. If you delete the folder, everything — keys, tokens,
+  access — is gone with it.
+
+### Keeping companies from getting mixed up
+
+- **You pick the company. The app never guesses on a write.** You can name the
+  company on any request, or set an active one first with **`select_company`**
+  (and check it with **`get_active_company`** or **`list_companies`**). For
+  anything that **changes** your books — an invoice, a bill, a journal entry —
+  the app will **stop and ask** if you did not say which company. It will only
+  auto-pick for harmless "read" actions, and only when just one company is
+  connected. So a payment can never quietly land in the wrong client's file.
+- **Only real company names are accepted.** If you name a company that is not
+  connected, the app refuses and shows you the list of ones that are.
+- **The company name is cleaned first.** Names are stripped down to plain
+  letters, numbers, dashes, and underscores. This stops a tricky name from
+  reaching any file outside the app's own folder.
+- **Test books and real books stay apart.** Each company remembers whether it is
+  a **test (sandbox)** or **real (production)** file, and every request is sent
+  to the matching QuickBooks address. A test action cannot hit real books.
+
+### Keeping your secrets safe
+
+- **Secrets never go online.** Your keys (`.env`) and your login passes
+  (`tokens*.json`) are on the "never upload" list (`.gitignore`). When someone
+  downloads this project, they get **no** secrets — they add their own.
+- **Secrets stay on your computer.** Your keys and tokens are only ever sent to
+  Intuit (QuickBooks). They are not shared with anyone else.
+- **Keys are not baked into the code.** They are read from your private `.env`
+  file, so the code can be shared safely.
+- **Secrets never show up in logs.** The app writes its notes to a hidden channel
+  (not the main output), and it never prints your keys or tokens.
+
+### Keeping the login safe
+
+- **A tamper check on every login.** Each login uses a one-time random code. If
+  the code that comes back does not match, the app rejects it. This blocks a
+  common web trick.
+- **The "catcher" only listens on your own computer.** During login, the app
+  opens a tiny helper at `localhost:3000` — *your* machine only — just long
+  enough to catch the pass, then it shuts down.
+- **That catcher is picky.** It answers only the exact login address and turns
+  everything else away.
+- **Logins refresh on their own.** Passes renew automatically before they run
+  out. If one fully expires (about 100 days unused), you just log in again.
+
+### Keeping changes from going wrong
+
+- **Preview before you post.** The bank-CSV import has a **`dry_run`** mode: it
+  shows you what it *would* do — every row and its category — before anything is
+  saved. You approve, then it posts.
+- **Errors are handled cleanly.** If a request fails, the app returns a clear
+  message instead of crashing, so nothing is left half-done.
+
+For a friendly Q&A version of all this, see [SECURITY.md](SECURITY.md).
+
+> ⚠️ Before you connect a **real (production)** company, read the security notes
+> above. Never share your `.env` or `tokens*.json` files.
+
+---
 
 ## Step-by-step setup (no coding experience needed)
 
@@ -73,6 +179,13 @@ Your web browser opens. Log in to the QuickBooks company and click **Allow**.
 When you see "✅ QuickBooks connected," close that browser tab. Repeat this step
 for each company you want to add (use a different nickname each time).
 
+**Adding many companies at once?** Use the batch tool — log in once, then just
+pick + Allow each company:
+```bash
+npm run connect:batch                 # keeps asking "add another?"
+npm run connect:batch -- --count 50   # or do a set number in a row
+```
+
 **Step 7 — Tell Claude Desktop about the app.**
 The easiest way is to let Claude do it for you: open **Claude Code** and type
 `/add-qbo-company`, then follow the prompts. It sets everything up and checks it
@@ -108,6 +221,10 @@ QBO_COMPANY=<slug> npm run connect      # writes tokens.<slug>.json
 
 # Or a single default company:
 npm run connect                          # writes tokens.json
+
+# Or add several in one browser session (log in once, pick + Allow each):
+npm run connect:batch                    # interactive
+npm run connect:batch -- --count 50      # fixed number
 ```
 A browser opens → log in to the QuickBooks company → **Allow**. Tokens are saved
 locally and auto-refresh (~100 days).
@@ -144,7 +261,7 @@ company at runtime:
 
 Resolution precedence per call: *explicit `company` → session default → env
 `QBO_COMPANY` → sole company (reads only) → error listing choices.* Write tools
-never auto-pick — see [SECURITY.md](SECURITY.md).
+never auto-pick — see the **Security** section above.
 
 > Typical flow in Claude: *"list my companies"* → *"work on 8315"* → *"create a
 > journal entry: debit Accounting 500, credit Checking 500"*.

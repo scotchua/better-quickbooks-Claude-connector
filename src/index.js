@@ -27,6 +27,8 @@ import {
   qboUpload,
   getRealmId,
   runAuthorizationFlow,
+  runBatchAuthorization,
+  deriveSlugFromRealm,
   listCompanies,
   sanitizeSlug,
 } from "./qbo.js";
@@ -41,6 +43,68 @@ if (process.argv.includes("--connect")) {
     process.exit(0);
   } catch (e) {
     log("Authorization failed:", e.message);
+    process.exit(1);
+  }
+}
+
+// ---- Pattern A: sequential batch authorization ----------------------------
+// `npm run connect:batch`            → keep going, asking "add another?" after each
+// `npm run connect:batch -- --count 50` → authorize exactly 50, no prompts
+// `npm run connect:batch -- --dry`   → print the plan and exit (no browser)
+if (process.argv.includes("--connect-batch")) {
+  const argv = process.argv;
+  const getArg = (name) => {
+    const i = argv.indexOf(name);
+    return i >= 0 && argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[i + 1] : undefined;
+  };
+  const dry = argv.includes("--dry");
+  const count = Number(getArg("--count") ?? getArg("-n"));
+  const hasCount = Number.isFinite(count) && count > 0;
+
+  try {
+    if (dry) {
+      const existing = await listCompanies();
+      const taken = new Set(existing.map((c) => c.slug));
+      log("Batch plan (dry run — nothing authorized):");
+      log(`  environment : ${(process.env.QBO_ENVIRONMENT || "sandbox").toLowerCase()}`);
+      log(`  redirect    : ${process.env.QBO_REDIRECT_URI || "http://localhost:3000/callback"}`);
+      log(`  mode        : ${hasCount ? `fixed count = ${count}` : "interactive (asks 'add another?')"}`);
+      log(`  already connected (${existing.length}): ${existing.map((c) => `${c.slug}(${c.environment})`).join(", ") || "none"}`);
+      log(`  example new slug for realm 9999999999123456 → "${deriveSlugFromRealm("9999999999123456", taken)}"`);
+      process.exit(0);
+    }
+
+    // Decide whether to authorize another company after each success.
+    let shouldContinue;
+    if (hasCount) {
+      shouldContinue = (connected) => connected.length < count;
+    } else {
+      const rl = (await import("node:readline/promises")).createInterface({
+        input: process.stdin,
+        output: process.stderr,
+      });
+      shouldContinue = async () => {
+        const answer = (await rl.question("Connect another company? [y/N] ")).trim().toLowerCase();
+        const yes = answer === "y" || answer === "yes";
+        if (!yes) rl.close();
+        return yes;
+      };
+    }
+
+    log(hasCount
+      ? `Batch authorizing ${count} companies. Log in once, then pick + Allow each.`
+      : "Batch authorize started. Log in once; after each company you'll be asked to add another.");
+
+    const connected = await runBatchAuthorization({ shouldContinue });
+
+    log(`\nDone — ${connected.length} compan${connected.length === 1 ? "y" : "ies"} authorized:`);
+    for (const c of connected) {
+      log(`  • ${c.slug}  (realm ${c.realmId}, ${c.environment})${c.reused ? "  [refreshed]" : ""}`);
+    }
+    log("\nNo config change or restart needed — the unified `qbo` connector picks these up on the next call.");
+    process.exit(0);
+  } catch (e) {
+    log("Batch authorization failed:", e.message);
     process.exit(1);
   }
 }
