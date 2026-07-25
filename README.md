@@ -32,6 +32,11 @@ This tool fixes both:
 
 You do **not** need to know how to code. The setup below is copy-and-paste.
 
+> 👉 **Want the friendly, click-by-click version?** See
+> **[SETUP_GUIDE.md](SETUP_GUIDE.md)** — it walks you through the whole thing by
+> just telling Claude Code *"help me install this for N clients"* and pasting your
+> keys. The steps below are the same process with more technical detail.
+
 ## What you can do
 
 - **Pull reports:** Profit & Loss, Balance Sheet, Cash Flow, Trial Balance,
@@ -224,6 +229,28 @@ worked. (If you'd rather do it by hand, see *Setup (quick reference)* below.)
 
 Your companies now appear, and you can ask things like *"list my QuickBooks
 companies"* or *"show me last month's profit and loss for acme."*
+
+**Step 9 — Set tool permissions (recommended).**
+In Claude Desktop, open **Settings → Connectors**, click a `qbo-…` connector, and
+you'll see its **Tool permissions**. This controls when Claude acts on its own
+versus asking you first.
+
+![QuickBooks connector tool permissions in Claude Desktop](docs/images/tool-permissions.png)
+
+Each tool can be set to **Always allow** (✓), **Needs approval** (✋), or **Never**
+(⛔). Our recommendation:
+
+- **Read-only tools → Always allow.** They only *look* at the books (reports,
+  lists, company info), so letting them run freely keeps Claude fast. Examples:
+  `list_companies`, `get_profit_and_loss`, `get_balance_sheet`, `get_cash_flow`,
+  `get_aged_receivables`, `get_invoices`.
+- **Write tools → Needs approval.** They *change* the books, so keep a human in
+  the loop — Claude pauses and asks before each. Examples: `create_invoice`,
+  `create_bill`, `create_journal_entry`, `send_invoice_email`, `void_invoice`,
+  `import_transactions_from_csv`.
+
+You get quick answers on anything that just reads, and a confirmation step on
+anything that posts. Repeat for each client connector.
 
 Stuck on a step? See
 [the troubleshooting guide](.claude/skills/add-qbo-company/references/troubleshooting.md).
