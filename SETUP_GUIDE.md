@@ -69,11 +69,10 @@ The app needs two secret keys from Intuit so it can talk to QuickBooks.
 Claude creates a settings file called **`.env`** and opens it for you. Paste your
 **Client ID** and **Client Secret** into the matching lines, then **save**.
 
-> ⚠️ **Save it as plain text — this is the one spot people trip on.**
-> On Mac, TextEdit likes to save as *rich text* (`.env.rtf`), which the app can't
-> read. Before saving: **Format → Make Plain Text** (or `Shift+Cmd+T`), then save
-> as **`.env`** (no `.txt`, no `.rtf`) right in the project folder.
-> If it does get saved as `.env.rtf`, just tell Claude — it can fix it.
+> 💡 **If saving is fiddly, let Claude handle it.** Some text editors quietly
+> change the file's format when you save, and Claude will tell you if the file
+> didn't come through cleanly. If that happens, just say so — Claude will sort it
+> out for you.
 
 Claude confirms the keys are in place **without printing your secret** on screen.
 
@@ -151,15 +150,13 @@ Desktop at the end.
 
 ## If something goes wrong
 
-- **A connector didn't appear?** You probably need a full **Cmd + Q** restart of
-  Claude Desktop (Step 7).
-- **Login failed / "invalid redirect"?** The Redirect URI on your Intuit app must
-  be exactly `http://localhost:3000/callback` (Step 4).
-- **"Can't read .env"?** It likely saved as `.env.rtf` — see Step 5, or ask Claude
-  to convert it.
-- **Anything else:** tell Claude Code what happened — it can re-check the
-  connection, re-authorize a company, or point you to
-  [the detailed troubleshooting guide](.claude/skills/add-qbo-company/references/troubleshooting.md).
+The simplest fix for almost anything: **tell Claude Code what happened.** It can
+re-check the connection, re-authorize a company, or set one up again for you.
+
+- **A connector didn't appear?** You probably just need a full **Cmd + Q** restart
+  of Claude Desktop (Step 7).
+- **The login didn't work?** Ask Claude to start the connection again.
+- **Anything else?** Describe what you saw to Claude — it'll take it from there.
 
 ---
 
