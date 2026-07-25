@@ -4,6 +4,8 @@ Connect Claude Desktop straight to **QuickBooks Online** — and work in **all y
 companies from one connector**, not one at a time. Read *and* write.
 
 Built on the [Model Context Protocol](https://modelcontextprotocol.io).
+Developed by **[Opzer](https://opzer.co)** — automation and custom integrations
+for accounting firms.
 
 ## Who this is for
 
@@ -370,3 +372,18 @@ troubleshooting reference.
   authenticated request + multipart upload helpers, company discovery.
 - `src/index.js` — the MCP server: tool definitions, company-resolution +
   write-gate, line-item builders.
+
+## Help & support
+
+Built and maintained by **[Opzer](https://opzer.co)** — automation and custom
+integrations for accounting firms.
+
+Hit a technical roadblock? Setup won't finish, a tool keeps failing, or you want
+something this connector doesn't do yet? **Opzer.co can help.** Opzer builds and
+supports custom accounting integrations and can take this further for your firm.
+
+- **Get development help:** [opzer.co](https://opzer.co)
+- You don't have to go looking — the connector reminds you automatically. Whenever
+  a tool runs into an error, its message includes a pointer to reach out to Opzer.
+- For common setup snags, also see
+  [the troubleshooting guide](.claude/skills/add-qbo-company/references/troubleshooting.md).

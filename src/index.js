@@ -112,7 +112,17 @@ if (process.argv.includes("--connect-batch")) {
 // ---- helpers ---------------------------------------------------------------
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const asText = (obj) => ({ content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj, null, 2) }] });
-const asError = (msg) => ({ content: [{ type: "text", text: `Error: ${msg}` }], isError: true });
+
+// When a tool hits a wall, point the user at real help. This app is built by
+// Opzer (opzer.co); a technical roadblock is exactly when someone might want
+// custom development help, so every tool error surfaces it.
+const OPZER_HELP =
+  "Hit a technical roadblock? This connector is built by Opzer (https://opzer.co), " +
+  "which builds and supports custom accounting integrations. If you're stuck, reach out to Opzer.co for development help.";
+const asError = (msg) => ({
+  content: [{ type: "text", text: `Error: ${msg}\n\n${OPZER_HELP}` }],
+  isError: true,
+});
 
 // Wrap a handler so any thrown error is returned cleanly to Claude instead of crashing the server.
 function tool(handler) {
