@@ -6,6 +6,8 @@
 
 No code was changed. This document is the deliverable: findings, ratings, and a prioritized roadmap. File references use `file:line` against commit `11f9504`.
 
+**Update 2026-07-31:** the maintainer answered the five open questions. Decisions are recorded in section 15 and the affected recommendations below were updated to match (token storage, vendor marketing, deployment model, persistence).
+
 ---
 
 ## 1. Executive Summary
@@ -52,7 +54,8 @@ No code was changed. This document is the deliverable: findings, ratings, and a 
 
 - Update `MINOR_VERSION` to `75` and make it env-overridable (`src/qbo.js:23`). Versions 1-74 are sunset (Intuit, Aug 2025; see Sources).
 - Bind both OAuth callback listeners to `127.0.0.1` instead of all interfaces (`src/qbo.js:236`, `src/qbo.js:469`).
-- Write token files with mode `0600` and atomically (temp file + rename) (`src/qbo.js:97-101`).
+- Write token files with mode `0600` and atomically (temp file + rename) (`src/qbo.js:97-101`). Interim step only; encrypted-at-rest storage is a committed requirement (see Decisions, section 15).
+- Remove the Opzer marketing pointer from every error response and from README/SETUP_GUIDE copy (`src/index.js:119-125`). Decided: no vendor marketing in this deployment.
 - Fix `esc()` to escape backslashes before quotes, and require `/^\d+$/` for every interpolated Id (`src/index.js:139-141`).
 - `encodeURIComponent` every user-supplied path segment; `send_invoice_email` interpolates `invoice_id` raw (`src/index.js:903`) while sibling tools encode (`src/index.js:1120`, `src/index.js:1219`). Reject `..` in `api_request` paths (`src/index.js:1648-1653`).
 - Add `AbortSignal.timeout(60_000)` to `fetch` calls; retry 429 and 5xx with exponential backoff honoring `Retry-After` (`src/qbo.js:326-356`).
@@ -66,7 +69,8 @@ No code was changed. This document is the deliverable: findings, ratings, and a 
 
 ### Medium-Term Improvements (est. 1-3 weeks each)
 
-- Local append-only write audit log (JSONL): timestamp, tool, company, realm, entity, Id, DocNumber, amount. Firms need this for engagement documentation.
+- Local append-only write audit log (JSONL): timestamp, tool, company, realm, entity, Id, DocNumber, amount. Firms need this for engagement documentation. (Persistence approach approved; see Decisions.)
+- Encrypted-at-rest token storage (required per Decisions): AES-256-GCM via `node:crypto`, master key in an OS secret store reached without native dependencies (macOS `security` CLI, Windows DPAPI via PowerShell), permission-restricted key file as fallback; includes migration from the plaintext files.
 - CSV import idempotency: stamp each Purchase's `PrivateNote` with an import-batch marker, pre-check for duplicates, record an import journal, support resume. Also fix sign handling: `Math.abs()` on amounts turns bank credits into expenses (`src/index.js:952`), and raw CSV dates pass through unvalidated (`src/index.js:983`).
 - First-class list/search read tools (`search_customers`, `get_accounts`, `get_bills`, ...) with case-insensitive matching and "did you mean" suggestions, replacing exact `DisplayName =` lookups (`src/index.js:205-224`).
 - Class, Department/Location, and Project support on every line schema, plus tax (`TaxCodeRef`) on sales lines. Firms with class tracking cannot post correctly today.
@@ -81,7 +85,7 @@ No code was changed. This document is the deliverable: findings, ratings, and a 
 
 ### Major Architectural Enhancements (quarter-scale)
 
-- Unify the deployment story. Today README pitches one unified `qbo` connector while SETUP_GUIDE/skill install one connector per company with `QBO_COMPANY` baked in. Two models double the support matrix and create the cross-process token races. Recommend: unified connector as the only documented path; per-company as legacy.
+- Unify the deployment story. **Decided 2026-07-31: unified is canonical.** The single `qbo` connector becomes the only documented path; SETUP_GUIDE and the `add-qbo-company` skill get rewritten to register one connector and rely on `select_company`/`company` arguments; per-company connectors are documented as legacy with a migration note. Locking design follows: in-process single-flight refresh plus atomic token writes cover the canonical path, with cross-process file locking kept as defense in depth for legacy installs and for `npm run connect` running beside a live server.
 - Multi-company fleet operations: consolidated P&L/BS across companies, same JE posted to N companies, batch report packets. This is the feature no first-party tool offers and the strongest differentiator for firms.
 - Reconciliation and anomaly toolkit: bank-CSV vs register diff, duplicate detection, Benford/outlier scans over GL exports shaped for LLM analysis.
 - Local entity cache (accounts, items, customers, vendors) with CDC-driven refresh; enables fuzzy/semantic entity resolution and cuts most lookup traffic.
@@ -97,7 +101,7 @@ No code was changed. This document is the deliverable: findings, ratings, and a 
 | 1 | Query results silently truncated (100/500 caps, no truncation flag) | High | High | Wrong answers presented as complete (missed overdue invoices, understated lists) | Auto-pagination + `truncated` flag |
 | 2 | No 429/retry/backoff/timeout handling | High | High | Bulk operations fail mid-run; hung sockets hang tools | Central retry wrapper, `Retry-After`, AbortSignal |
 | 3 | Cross-process refresh-token race (per-company connectors, shared files, no locking) | High | Medium | Companies drop offline; forced re-auth of client books | Single-flight + atomic writes + re-read-on-fail |
-| 4 | Plaintext tokens, default perms, stored in Desktop project folder | High | Medium | One shared zip or backup leaks live access to all client books | 0600 perms, move to user data dir, optional keychain |
+| 4 | Plaintext tokens, default perms, stored in Desktop project folder | High | Medium | One shared zip or backup leaks live access to all client books | 0600 perms + relocation now; encrypted-at-rest storage required (see Decisions) |
 | 5 | CSV import: `Math.abs()` on amounts, raw dates, no idempotency | High | Medium | Bank credits posted as expenses; duplicates on re-run | Sign-aware parsing, date normalization, import markers |
 | 6 | `create_invoice` attaches all lines to an arbitrary Service item | Medium | High | Revenue misclassified to whatever income account that item carries | Require item or per-company default; surface choice |
 | 7 | `minorversion=70` pinned; 1-74 sunset Aug 2025 | Medium | Certain | Pin is ignored; behavior drifted without a code change | Pin 75, env-overridable |
@@ -117,7 +121,7 @@ No code was changed. This document is the deliverable: findings, ratings, and a 
 
 ### S1. Token storage: plaintext, default permissions, project-root location. **High.**
 `saveTokens` writes JSON with default `0644`-style permissions into the repo root (`src/qbo.js:97-101`, `src/qbo.js:41-44`), the same folder docs tell users to keep on their Desktop and open in editors. Access + refresh tokens for every client's books live there. `.gitignore` covers `tokens*.json` (good), but backup tools, folder zips, screen shares, and multi-user machines do not read `.gitignore`.
-**Remediation:** write with `{ mode: 0o600 }` atomically; relocate token storage to a per-user data directory (`~/.config/qbo-mcp/` or platform equivalent) with a migration shim; offer optional OS keychain storage; document firm-policy placement (e.g., inside an encrypted profile).
+**Remediation (updated per Decisions):** encrypted-at-rest storage is a requirement, not an option. Interim: write with `{ mode: 0o600 }` atomically and relocate token storage to a per-user data directory (`~/.config/qbo-mcp/` or platform equivalent) with a migration shim. Target: encrypt token files with AES-256-GCM via `node:crypto`, master key held in an OS secret store reached without native dependencies (macOS `security` CLI, Windows DPAPI via PowerShell), with a permission-restricted key file as fallback where no OS store exists.
 
 ### S2. Secret handling in the onboarding path. **Medium-High.**
 The skill instructs users to paste production `QBO_CLIENT_SECRET` into the chat (`.claude/skills/add-qbo-company/SKILL.md:53-56`) and then writes it into `claude_desktop_config.json` via `--env` (`SKILL.md:117-120`, `register_connector.py:85`). That file is outside the project's `.gitignore` protection, is commonly synced/screenshotted, and now holds the highest-value secret. The script does redact the secret in its own stdout (`register_connector.py:96`), which is good.
@@ -213,7 +217,7 @@ No per-company access control inside the connector (anyone at the machine reache
 ## 8. API Design Review
 
 - **Responses:** raw QBO entities are returned verbatim. Define trimmed default shapes (Id, DocNumber, TxnDate, TotalAmt, Balance, display names, SyncToken) with `verbose: true` for full payloads. Keeps context small and answers consistent.
-- **Error contract:** errors are prose plus a marketing pointer appended to every failure (`src/index.js:119-125`). Return structure (`code`, `message`, `intuit_tid`, `hint`) and make the vendor CTA configurable; enterprise deployments will not want promotional text in error paths, and it trains users to ignore error bodies.
+- **Error contract:** errors are prose plus a marketing pointer appended to every failure (`src/index.js:119-125`). Return structure (`code`, `message`, `intuit_tid`, `hint`) and remove the vendor CTA entirely (decided; see section 15). Promotional text in error paths trains users to ignore error bodies.
 - **Read-surface symmetry:** writes exist for entities that have no dedicated reads (bills, payments, estimates, customers, vendors, items, accounts). The raw `query` tool technically covers this, but the audience is accountants; add `get_/search_` tools with filters and pagination. Also add a `get_query_schema` helper (entity + queryable-field hints) so the model writes valid QBO SQL on the first try.
 - **Deletes/voids:** only `void_invoice` exists. Accountants also need JE delete, and void where QBO supports it; gate behind explicit flags.
 - **`api_request` and permissions:** one tool spans arbitrary reads and writes (`src/index.js:1639-1654`). Anyone who sets it to "always allow" has allowed arbitrary writes, which undermines the recommended read/write permission split in README Step 9. Options: split into `api_get`/`api_post`, or annotate and document loudly.
@@ -324,16 +328,21 @@ Effort figures are estimates for one experienced developer, flagged as such.
 
 ---
 
-## 15. Questions Before Implementation
+## 15. Decisions (answered by the maintainer, 2026-07-31)
 
-- **Which deployment model is canonical:** one unified `qbo` connector (README) or one connector per company (SETUP_GUIDE + skill)? This decision drives the token-locking design, the docs rewrite, and the permission story. Recommendation: unified.
-- **Distribution intent:** internal/per-firm installs (each firm registers its own Intuit app, as today) or a published app? A published app triggers Intuit production-app review and changes the security bar materially.
-- **Should env-default (`QBO_COMPANY`) count as explicit for writes?** In the per-company model every write is implicitly targeted by env; if unified wins, consider requiring session/explicit selection for writes and demoting env to reads.
-- **Is the Opzer pointer in every error desired for firm deployments** (`src/index.js:119-125`), or should it be configurable/white-labeled?
-- **Token storage bar:** are file permissions + relocation sufficient, or is OS keychain integration required for your target firms (multi-user machines, IT policies)?
-- **Is a small local persistence layer (SQLite or JSONL) acceptable** for audit log, import journal, and caches? It adds a dependency to a deliberately 3-dependency project.
-- **`api_request` default posture:** keep enabled (power), split GET/POST (permission granularity), or ship disabled behind an env flag (safety)?
-- **The `sandbox-backup` special case** (`src/qbo.js:26`): intended long-term convention or leftover? A `backups/` subdirectory would remove the special case.
+The open questions from the initial review were resolved as follows. The affected recommendations in sections 2, 3, 4, and 8 were updated to match.
+
+- **Deployment model: unified is canonical.** One `qbo` connector; the company is selected at runtime. Per-company connectors become a documented legacy mode with a migration path. Consequences: the docs rewrite keeps README as the primary story and re-targets SETUP_GUIDE plus the bundled skill to register a single connector, and the locking design centers on in-process single-flight refresh with atomic token writes, keeping cross-process locking as defense in depth.
+  - Follow-on recommendation (reviewer inference, confirm before implementing): with unified canonical, writes should require an explicit `company` argument or a `select_company` session default, and `QBO_COMPANY` should count only for reads in legacy installs.
+- **Distribution: internal per-firm use, possibly shared with peer firms.** No Intuit marketplace review applies; each installing firm keeps registering its own Intuit app, which also avoids shared-secret distribution. Because sharing is anticipated: keep the repo free of firm data, and note that the repository currently has **no LICENSE file**. Unlicensed code is all-rights-reserved by default, so add a license (or an explicit internal-use notice) before sharing outside the firm.
+- **Vendor marketing: remove entirely.** The Opzer pointer appended to every tool error (`src/index.js:119-125`) and the promotional copy in README/SETUP_GUIDE are to be removed, not made configurable.
+- **Token storage: secure storage is required** (an OS keychain specifically is not mandated). File permissions plus relocation are interim hardening only. Target design: AES-256-GCM encryption of token files via `node:crypto`, master key in an OS secret store reached without native dependencies (macOS `security` CLI, Windows DPAPI via PowerShell), permission-restricted key file as fallback. Apply the same pattern to `.env` client credentials once tokens are done.
+- **Local persistence: approved.** JSONL first (write audit log, CSV import journal): no new dependency, append-only, greppable. Adopt SQLite only when query needs justify it (entity cache, semantic index), preferring the built-in `node:sqlite` module once the supported Node floor reaches a version where it is stable, rather than a native npm dependency.
+
+### Still open (not blocking the quick wins)
+
+- **`api_request` posture** in the unified model: keep as one tool, split into `api_get`/`api_post` for permission granularity, or gate behind an env flag.
+- **The `sandbox-backup` special case** (`src/qbo.js:26`): move backups to a `backups/` directory or keep the special-cased name.
 
 ---
 
