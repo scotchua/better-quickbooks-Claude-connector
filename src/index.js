@@ -26,6 +26,7 @@ import {
   qboQuery,
   qboUpload,
   getRealmId,
+  getValidTokens,
   runAuthorizationFlow,
   runBatchAuthorization,
   deriveSlugFromRealm,
@@ -113,14 +114,8 @@ if (process.argv.includes("--connect-batch")) {
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const asText = (obj) => ({ content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj, null, 2) }] });
 
-// When a tool hits a wall, point the user at real help. This app is built by
-// Opzer (opzer.co); a technical roadblock is exactly when someone might want
-// custom development help, so every tool error surfaces it.
-const OPZER_HELP =
-  "Hit a technical roadblock? This connector is built by Opzer (https://opzer.co), " +
-  "which builds and supports custom accounting integrations. If you're stuck, reach out to Opzer.co for development help.";
 const asError = (msg) => ({
-  content: [{ type: "text", text: `Error: ${msg}\n\n${OPZER_HELP}` }],
+  content: [{ type: "text", text: `Error: ${msg}` }],
   isError: true,
 });
 
@@ -137,7 +132,17 @@ function tool(handler) {
 }
 
 function esc(v) {
-  return String(v).replace(/'/g, "\\'");
+  // Backslashes first, then quotes. Otherwise a value ending in a backslash
+  // would escape the closing quote and break out of the string literal.
+  return String(v).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
+// QuickBooks entity Ids are numeric. Validate before interpolating one into a
+// query or URL path so a crafted "Id" can never change the request shape.
+function assertId(v, what = "Id") {
+  const s = String(v).trim();
+  if (!/^\d+$/.test(s)) throw new Error(`${what} must be a numeric QuickBooks Id, got "${v}".`);
+  return s;
 }
 
 // Build a QBO report query string from a params object, dropping empties.
@@ -147,6 +152,25 @@ function reportQuery(params) {
     .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
     .join("&");
   return qs ? `?${qs}` : "";
+}
+
+// Page a SELECT query with STARTPOSITION/MAXRESULTS until exhausted or a hard
+// ceiling, so callers never mistake a single page for the full result set.
+// `baseSql` must not already contain STARTPOSITION or MAXRESULTS.
+const QUERY_PAGE_SIZE = 100; // QBO's default page size
+async function qboQueryAll(baseSql, entity, { company, maxTotal = 1000 } = {}) {
+  const rows = [];
+  let start = 1;
+  let truncated = false;
+  for (;;) {
+    const page =
+      (await qboQuery(`${baseSql} STARTPOSITION ${start} MAXRESULTS ${QUERY_PAGE_SIZE}`, { company }))[entity] || [];
+    rows.push(...page);
+    if (page.length < QUERY_PAGE_SIZE) break;
+    if (rows.length >= maxTotal) { truncated = true; break; }
+    start += QUERY_PAGE_SIZE;
+  }
+  return { rows, truncated };
 }
 
 // ---- company selection -----------------------------------------------------
@@ -281,7 +305,7 @@ async function buildJournalLines(lines, company) {
 }
 
 async function readJournalEntry(id, company) {
-  const r = await qboRequest(`/journalentry/${encodeURIComponent(id)}`, { company });
+  const r = await qboRequest(`/journalentry/${encodeURIComponent(assertId(id, "journal_entry_id"))}`, { company });
   const entry = r.JournalEntry;
   if (!entry) throw new Error(`No journal entry with Id ${id}`);
   return entry;
@@ -301,8 +325,9 @@ async function resolveRef(entity, nameOrId, company, nameField = "DisplayName") 
 
 // Fetch a full entity record (for its SyncToken) before a sparse update / void / delete.
 async function fetchEntity(entity, id, company) {
-  const rec = (await qboQuery(`SELECT * FROM ${entity} WHERE Id = '${esc(id)}'`, { company }))[entity]?.[0];
-  if (!rec) throw new Error(`No ${entity} with Id ${id}`);
+  const cleanId = assertId(id, `${entity} Id`);
+  const rec = (await qboQuery(`SELECT * FROM ${entity} WHERE Id = '${cleanId}'`, { company }))[entity]?.[0];
+  if (!rec) throw new Error(`No ${entity} with Id ${cleanId}`);
   return rec;
 }
 
@@ -430,7 +455,7 @@ function parseCSV(text) {
 // ---- MCP server ------------------------------------------------------------
 const server = new McpServer({ name: "qbo-mcp-server", version: "1.0.0" });
 
-/* =========================== COMPANY TOOLS (3) =========================== */
+/* ==================== COMPANY TOOLS & DIAGNOSTICS (4) ==================== */
 
 server.tool(
   "list_companies",
@@ -479,6 +504,53 @@ server.tool(
       source,
       ...(info ? { realmId: info.realmId, environment: info.environment } : {}),
     });
+  })
+);
+
+server.tool(
+  "health_check",
+  "Verify connectivity for one company or every connected company: token freshness (refreshing if due), realm, environment, and a live API round trip. The fastest first step when something is not working.",
+  {
+    company: companyArg,
+    all: z.boolean().optional().describe("Check every connected company instead of one"),
+  },
+  tool(async ({ company, all }) => {
+    const companies = await listCompanies();
+    let targets;
+    if (all) {
+      targets = companies.length ? companies.map((x) => x.slug) : [""];
+    } else {
+      try {
+        targets = [await resolveCompany(company)];
+      } catch {
+        // No single company resolvable (none selected, several connected):
+        // fall back to checking them all.
+        targets = companies.length ? companies.map((x) => x.slug) : [""];
+      }
+    }
+    const now = Date.now();
+    const results = [];
+    for (const slug of targets) {
+      const entry = { company: slug || "(default)" };
+      try {
+        const tokens = await getValidTokens(slug);
+        entry.realmId = tokens.realmId;
+        entry.environment = tokens.environment;
+        entry.access_token_minutes_left = Math.max(0, Math.round((tokens.expires_at - now) / 60_000));
+        entry.refresh_token_days_left = tokens.refresh_expires_at
+          ? Math.max(0, Math.round((tokens.refresh_expires_at - now) / 86_400_000))
+          : null;
+        const info = await qboRequest(`/companyinfo/${tokens.realmId}`, { company: slug });
+        entry.company_name = info.CompanyInfo?.CompanyName ?? null;
+        entry.status = "ok";
+      } catch (e) {
+        entry.status = "error";
+        entry.error = e.message;
+      }
+      results.push(entry);
+    }
+    const failing = results.filter((r) => r.status !== "ok").length;
+    return asText({ checked: results.length, healthy: results.length - failing, failing, results });
   })
 );
 
@@ -547,22 +619,17 @@ server.tool(
   tool(async ({ status, customer_id, start_date, end_date, company }) => {
     const c = await resolveCompany(company);
     const where = [];
-    if (customer_id) where.push(`CustomerRef = '${esc(customer_id)}'`);
-    if (start_date) where.push(`TxnDate >= '${start_date}'`);
-    if (end_date) where.push(`TxnDate <= '${end_date}'`);
-    const sql = `SELECT * FROM Invoice${where.length ? " WHERE " + where.join(" AND ") : ""} ORDERBY TxnDate DESC MAXRESULTS 100`;
-    let invoices = (await qboQuery(sql, { company: c })).Invoice || [];
-    if (status) {
-      const today = todayISO();
-      invoices = invoices.filter((inv) => {
-        const bal = Number(inv.Balance || 0);
-        if (status === "paid") return bal === 0;
-        if (status === "open") return bal > 0;
-        if (status === "overdue") return bal > 0 && inv.DueDate && inv.DueDate < today;
-        return true;
-      });
-    }
-    return asText({ count: invoices.length, invoices });
+    if (customer_id) where.push(`CustomerRef = '${assertId(customer_id, "customer_id")}'`);
+    if (start_date) where.push(`TxnDate >= '${esc(start_date)}'`);
+    if (end_date) where.push(`TxnDate <= '${esc(end_date)}'`);
+    // Status is part of the WHERE clause (not post-filtered on one page) so
+    // counts stay honest across pagination.
+    if (status === "paid") where.push(`Balance = '0'`);
+    if (status === "open") where.push(`Balance > '0'`);
+    if (status === "overdue") where.push(`Balance > '0'`, `DueDate < '${todayISO()}'`);
+    const sql = `SELECT * FROM Invoice${where.length ? " WHERE " + where.join(" AND ") : ""} ORDERBY TxnDate DESC`;
+    const { rows, truncated } = await qboQueryAll(sql, "Invoice", { company: c });
+    return asText({ count: rows.length, truncated, invoices: rows });
   })
 );
 
@@ -573,9 +640,12 @@ server.tool(
   tool(async ({ company }) => {
     const c = await resolveCompany(company);
     const today = todayISO();
-    const r = await qboQuery(`SELECT * FROM Invoice WHERE DueDate < '${today}' MAXRESULTS 500`, { company: c });
-    const overdue = (r.Invoice || []).filter((inv) => Number(inv.Balance || 0) > 0);
-    return asText({ as_of: today, count: overdue.length, invoices: overdue });
+    const { rows, truncated } = await qboQueryAll(
+      `SELECT * FROM Invoice WHERE DueDate < '${today}' AND Balance > '0'`,
+      "Invoice",
+      { company: c }
+    );
+    return asText({ as_of: today, count: rows.length, truncated, invoices: rows });
   })
 );
 
@@ -585,7 +655,18 @@ server.tool(
   { sql_query: z.string(), company: companyArg },
   tool(async ({ sql_query, company }) => {
     const c = await resolveCompany(company);
-    return asText(await qboQuery(sql_query, { company: c }));
+    const r = await qboQuery(sql_query, { company: c });
+    // QBO silently caps un-paginated queries at its default page size. Flag a
+    // full page so it is never mistaken for the complete result set.
+    const arr = Object.values(r).find(Array.isArray);
+    if (arr && arr.length >= QUERY_PAGE_SIZE && !/\bMAXRESULTS\b/i.test(sql_query)) {
+      return asText({
+        ...r,
+        possibly_truncated: true,
+        note: `Result hit QBO's default page cap (${arr.length} rows). Add STARTPOSITION/MAXRESULTS to page through the full set.`,
+      });
+    }
+    return asText(r);
   })
 );
 
@@ -747,7 +828,7 @@ server.tool(
   },
   tool(async ({ customer_id, display_name, email, phone, billing_address, company }) => {
     const c = await resolveCompany(company, { write: true });
-    const current = (await qboQuery(`SELECT * FROM Customer WHERE Id = '${esc(customer_id)}'`, { company: c })).Customer?.[0];
+    const current = (await qboQuery(`SELECT * FROM Customer WHERE Id = '${assertId(customer_id, "customer_id")}'`, { company: c })).Customer?.[0];
     if (!current) throw new Error(`No customer with Id ${customer_id}`);
     const payload = { Id: current.Id, SyncToken: current.SyncToken, sparse: true };
     if (display_name) payload.DisplayName = display_name;
@@ -846,12 +927,18 @@ server.tool(
     category: z.string().describe("Expense account name to categorize against"),
     transaction_date: z.string().describe("YYYY-MM-DD"),
     memo: z.string().optional(),
+    create_vendor_if_missing: z.boolean().optional().describe("Create the vendor when no exact DisplayName match exists (default false, so a typo cannot mint a phantom vendor)"),
     company: companyArg,
   },
-  tool(async ({ vendor_name, amount, category, transaction_date, memo, company }) => {
+  tool(async ({ vendor_name, amount, category, transaction_date, memo, create_vendor_if_missing, company }) => {
     const c = await resolveCompany(company, { write: true });
     let vendor = await findVendorByName(vendor_name, c);
     if (!vendor) {
+      if (!create_vendor_if_missing) {
+        throw new Error(
+          `Vendor not found: "${vendor_name}". Check the exact name (query \"SELECT * FROM Vendor\"), or pass create_vendor_if_missing: true to create it.`
+        );
+      }
       const created = await qboRequest(`/vendor`, { method: "POST", body: { DisplayName: vendor_name }, company: c });
       vendor = created.Vendor;
     }
@@ -900,7 +987,7 @@ server.tool(
   tool(async ({ invoice_id, email, company }) => {
     const c = await resolveCompany(company, { write: true });
     const q = email ? `?sendTo=${encodeURIComponent(email)}` : "";
-    await qboRequest(`/invoice/${invoice_id}/send${q}`, { method: "POST", company: c });
+    await qboRequest(`/invoice/${encodeURIComponent(assertId(invoice_id, "invoice_id"))}/send${q}`, { method: "POST", company: c });
     return asText({ sent: true, invoice_id, to: email || "email on file" });
   })
 );
@@ -1627,12 +1714,17 @@ server.tool(
   },
   tool(async ({ attach_to_entity, attach_to_id, max_results, company }) => {
     const c = await resolveCompany(company);
-    const all = (await qboQuery(`SELECT * FROM Attachable MAXRESULTS ${max_results || 100}`, { company: c })).Attachable || [];
+    // AttachableRef is not queryable in QBO, so fetch (paginated) and filter
+    // client-side; `truncated` says whether the scan hit the cap.
+    const { rows: all, truncated } = await qboQueryAll(`SELECT * FROM Attachable`, "Attachable", {
+      company: c,
+      maxTotal: max_results || 1000,
+    });
     const items = attach_to_id
       ? all.filter((a) => (a.AttachableRef || []).some((r) =>
           r.EntityRef?.value === String(attach_to_id) && (!attach_to_entity || r.EntityRef?.type === attach_to_entity)))
       : all;
-    return asText({ count: items.length, attachments: items });
+    return asText({ count: items.length, scanned: all.length, truncated, attachments: items });
   })
 );
 
@@ -1649,6 +1741,16 @@ server.tool(
     const isWrite = (method || "GET").toUpperCase() !== "GET";
     const c = await resolveCompany(company, { write: isWrite });
     const p = reqPath.startsWith("/") ? reqPath : `/${reqPath}`;
+    if (/[\r\n\t]/.test(p)) throw new Error("Control characters are not allowed in `path`.");
+    let decodedPath;
+    try {
+      decodedPath = decodeURIComponent(p.split("?")[0]);
+    } catch {
+      throw new Error("Invalid percent-encoding in `path`.");
+    }
+    if (decodedPath.includes("..") || decodedPath.includes("\\")) {
+      throw new Error("Path traversal sequences are not allowed in `path`; it must stay under /v3/company/{realmId}.");
+    }
     return asText(await qboRequest(p, { method: method || "GET", body, company: c }));
   })
 );
@@ -1656,4 +1758,4 @@ server.tool(
 // ---- start -----------------------------------------------------------------
 const transport = new StdioServerTransport();
 await server.connect(transport);
-log("QBO MCP server running (stdio). 54 tools registered.");
+log("QBO MCP server running (stdio).");

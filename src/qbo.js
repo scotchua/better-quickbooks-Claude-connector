@@ -10,7 +10,7 @@
 import http from "node:http";
 import { exec } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { readFile, writeFile, readdir } from "node:fs/promises";
+import { readFile, writeFile, readdir, rename } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -20,7 +20,42 @@ const ROOT = path.join(__dirname, "..");
 const AUTHORIZE_URL = "https://appcenter.intuit.com/connect/oauth2";
 const TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer";
 const SCOPE = "com.intuit.quickbooks.accounting";
-const MINOR_VERSION = "70";
+// Intuit sunset minor versions 1-74 on 2025-08-01; 75 is the supported baseline.
+const MINOR_VERSION = process.env.QBO_MINOR_VERSION || "75";
+
+// Network policy for every Intuit call: a hard timeout, plus retries with
+// exponential backoff and jitter. 429 (throttled) is always retried because the
+// request was rejected before processing; 5xx and network errors are retried
+// only for idempotent requests, so a write is never blindly re-sent after the
+// server may have applied it.
+const TIMEOUT_MS = Number(process.env.QBO_TIMEOUT_MS) || 60_000;
+const MAX_RETRIES = 3;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function qboFetch(url, init = {}, { idempotent = false } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    const backoff = Math.min(1000 * 2 ** attempt, 8000) + Math.floor(Math.random() * 250);
+    let res;
+    try {
+      res = await fetch(url, { ...init, signal: AbortSignal.timeout(TIMEOUT_MS) });
+    } catch (e) {
+      const timedOut = e?.name === "TimeoutError" || e?.name === "AbortError";
+      if (idempotent && attempt < MAX_RETRIES) { await sleep(backoff); continue; }
+      throw timedOut ? new Error(`Request timed out after ${TIMEOUT_MS / 1000}s`) : e;
+    }
+    if (res.status === 429 && attempt < MAX_RETRIES) {
+      const ra = Number(res.headers.get("retry-after"));
+      await sleep(Number.isFinite(ra) && ra > 0 ? ra * 1000 : backoff);
+      continue;
+    }
+    if (res.status >= 500 && idempotent && attempt < MAX_RETRIES) {
+      await sleep(backoff);
+      continue;
+    }
+    return res;
+  }
+}
 
 // Token files that exist on disk but are not real, selectable companies.
 const NON_COMPANY_SLUGS = new Set(["sandbox-backup"]);
@@ -96,7 +131,11 @@ async function loadTokens(slug) {
 
 async function saveTokens(slug, tokens) {
   const p = tokensPathFor(slug);
-  await writeFile(p, JSON.stringify(tokens, null, 2), "utf8");
+  // Owner-only permissions, written atomically: a temp file with 0600 perms is
+  // renamed over the target so concurrent readers never see a torn file.
+  const tmp = `${p}.${process.pid}.tmp`;
+  await writeFile(tmp, JSON.stringify(tokens, null, 2), { encoding: "utf8", mode: 0o600 });
+  await rename(tmp, p);
   log("Tokens saved to", p);
 }
 
@@ -189,7 +228,7 @@ async function runAuthorizationFlow() {
           code,
           redirect_uri: creds.redirectUri,
         });
-        const tokenRes = await fetch(TOKEN_URL, {
+        const tokenRes = await qboFetch(TOKEN_URL, {
           method: "POST",
           headers: {
             Authorization: basicAuthHeader(creds),
@@ -197,7 +236,7 @@ async function runAuthorizationFlow() {
             Accept: "application/json",
           },
           body,
-        });
+        }, { idempotent: true });
         const data = await tokenRes.json();
         if (!tokenRes.ok) {
           res.writeHead(500).end("Token exchange failed. Check the server console.");
@@ -233,7 +272,8 @@ async function runAuthorizationFlow() {
       }
     });
 
-    server.listen(port, () => {
+    // Loopback only: the callback listener must never be reachable from the LAN.
+    server.listen(port, "127.0.0.1", () => {
       log(`Waiting for QBO login on ${creds.redirectUri} ...`);
       log("Opening your browser to authorize QuickBooks.");
       // Always surface the URL, not just on failure — if the auto-open misfires
@@ -248,12 +288,23 @@ async function runAuthorizationFlow() {
 }
 
 async function refreshTokens(slug, existing) {
+  // Intuit rotates the refresh token on every refresh, so a parallel caller or
+  // another process may already have rotated it. Prefer the newest state on
+  // disk: if a fresh access token is already there, use it; otherwise refresh
+  // with the newest refresh token we can find.
+  const onDisk = await loadTokens(slug);
+  if (onDisk && onDisk.access_token !== existing.access_token &&
+      Date.now() < (onDisk.expires_at ?? 0) - 60_000) {
+    return onDisk;
+  }
+  const current = onDisk?.refresh_token ? onDisk : existing;
+
   const creds = credentials();
   const body = new URLSearchParams({
     grant_type: "refresh_token",
-    refresh_token: existing.refresh_token,
+    refresh_token: current.refresh_token,
   });
-  const res = await fetch(TOKEN_URL, {
+  const res = await qboFetch(TOKEN_URL, {
     method: "POST",
     headers: {
       Authorization: basicAuthHeader(creds),
@@ -261,25 +312,46 @@ async function refreshTokens(slug, existing) {
       Accept: "application/json",
     },
     body,
-  });
+  }, { idempotent: true });
   const data = await res.json();
   if (!res.ok) {
-    throw new Error("Token refresh failed: " + JSON.stringify(data));
+    const label = sanitizeSlug(slug) || "the default company";
+    const reconnect = sanitizeSlug(slug)
+      ? `\`QBO_COMPANY=${sanitizeSlug(slug)} npm run connect\``
+      : "`npm run connect`";
+    throw new Error(
+      `Token refresh failed for ${label}: ${JSON.stringify(data)}. Re-authorize with ${reconnect}.`
+    );
   }
   const now = Date.now();
   const tokens = {
-    ...existing,
+    ...current,
     access_token: data.access_token,
     // Intuit rotates the refresh token; keep the new one if returned.
-    refresh_token: data.refresh_token || existing.refresh_token,
+    refresh_token: data.refresh_token || current.refresh_token,
     expires_at: now + data.expires_in * 1000,
     refresh_expires_at: now + (data.x_refresh_token_expires_in
       ? data.x_refresh_token_expires_in * 1000
-      : existing.refresh_expires_at - now),
+      : current.refresh_expires_at - now),
   };
   await saveTokens(slug, tokens);
   log(`Access token refreshed${sanitizeSlug(slug) ? ` for "${sanitizeSlug(slug)}"` : ""}.`);
   return tokens;
+}
+
+// In-flight refresh per company, so concurrent tool calls share one refresh
+// instead of racing to rotate the same refresh token.
+const refreshInFlight = new Map();
+
+function refreshTokensOnce(slug, tokens) {
+  const key = sanitizeSlug(slug) || "__default__";
+  if (!refreshInFlight.has(key)) {
+    refreshInFlight.set(
+      key,
+      refreshTokens(slug, tokens).finally(() => refreshInFlight.delete(key))
+    );
+  }
+  return refreshInFlight.get(key);
 }
 
 // Returns valid tokens for a company, refreshing or (on --connect) launching the
@@ -314,7 +386,7 @@ async function getValidTokens(slug, { allowInteractive = false } = {}) {
 
   // Refresh if the access token expires within 60 seconds.
   if (now > tokens.expires_at - 60_000) {
-    tokens = await refreshTokens(slug, tokens);
+    tokens = await refreshTokensOnce(slug, tokens);
   }
   return tokens;
 }
@@ -331,7 +403,7 @@ async function qboRequest(pathAndQuery, { method = "GET", body, company } = {}) 
     `${apiBase}/v3/company/${tokens.realmId}${pathAndQuery}` +
     `${sep}minorversion=${MINOR_VERSION}`;
 
-  const res = await fetch(url, {
+  const res = await qboFetch(url, {
     method,
     headers: {
       Authorization: `Bearer ${tokens.access_token}`,
@@ -339,7 +411,7 @@ async function qboRequest(pathAndQuery, { method = "GET", body, company } = {}) 
       ...(body ? { "Content-Type": "application/json" } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
-  });
+  }, { idempotent: method === "GET" });
 
   const text = await res.text();
   let data;
@@ -367,7 +439,7 @@ async function qboUpload(formData, { company } = {}) {
   const tokens = await getValidTokens(company ?? DEFAULT_COMPANY);
   const apiBase = apiBaseFor(tokens.environment);
   const url = `${apiBase}/v3/company/${tokens.realmId}/upload?minorversion=${MINOR_VERSION}`;
-  const res = await fetch(url, {
+  const res = await qboFetch(url, {
     method: "POST",
     headers: { Authorization: `Bearer ${tokens.access_token}`, Accept: "application/json" },
     body: formData,
@@ -407,7 +479,7 @@ async function exchangeCodeForTokens(code, environment) {
     code,
     redirect_uri: creds.redirectUri,
   });
-  const res = await fetch(TOKEN_URL, {
+  const res = await qboFetch(TOKEN_URL, {
     method: "POST",
     headers: {
       Authorization: basicAuthHeader(creds),
@@ -415,7 +487,7 @@ async function exchangeCodeForTokens(code, environment) {
       Accept: "application/json",
     },
     body,
-  });
+  }, { idempotent: true });
   const data = await res.json();
   if (!res.ok) throw new Error("Token exchange failed: " + JSON.stringify(data));
   const now = Date.now();
@@ -466,7 +538,8 @@ async function runBatchAuthorization({ shouldContinue } = {}) {
 
   await new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(port, resolve);
+    // Loopback only: the callback listener must never be reachable from the LAN.
+    server.listen(port, "127.0.0.1", resolve);
   });
   log(`Batch authorize listening on ${creds.redirectUri} (${environment}).`);
 

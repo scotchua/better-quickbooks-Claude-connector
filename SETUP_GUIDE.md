@@ -160,6 +160,6 @@ re-check the connection, re-authorize a company, or set one up again for you.
 
 ---
 
-Built and maintained by **[Opzer](https://opzer.co)** — automation and custom
-integrations for accounting firms. Hit a roadblock or want this taken further for
-your firm? [opzer.co](https://opzer.co) can help.
+Hit a roadblock? Tell Claude Code what happened and it will take it from there.
+The `health_check` tool verifies every connected company's tokens and API access
+in one call.
