@@ -8,6 +8,9 @@ tokens*.json
 # Local records (write audit log, CSV import journal)
 audit-log/
 
+# Downloaded documents (invoice/estimate PDFs)
+exports/
+
 # Generated output / scratch
 save-excels-here/
 *.log

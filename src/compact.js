@@ -46,6 +46,16 @@ const SHAPES = {
     Id: e.Id, Name: e.Name, AcctNum: e.AcctNum, AccountType: e.AccountType,
     AccountSubType: e.AccountSubType, CurrentBalance: e.CurrentBalance, Active: e.Active,
   }),
+  Term: (e) => ({
+    Id: e.Id, Name: e.Name, Type: e.Type, DueDays: e.DueDays,
+    DiscountPercent: e.DiscountPercent, Active: e.Active,
+  }),
+  PaymentMethod: (e) => ({ Id: e.Id, Name: e.Name, Type: e.Type, Active: e.Active }),
+  TaxCode: (e) => ({ Id: e.Id, Name: e.Name, Description: e.Description, Active: e.Active }),
+  Budget: (e) => ({
+    Id: e.Id, Name: e.Name, StartDate: e.StartDate, EndDate: e.EndDate,
+    BudgetType: e.BudgetType, Active: e.Active,
+  }),
 };
 
 export function compactList(entity, rows, verbose = false) {

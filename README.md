@@ -26,9 +26,10 @@ This tool fixes both:
   no restarts.
 - **Read *and* write.** Create invoices, bills, journal entries, and more — the
   things you actually do in QuickBooks.
-- **73 tools** covering reports, transactions, searches and lists, bill
-  payments, attachments, change tracking, reconciliation, multi-company
-  consolidation, diagnostics, and a safe bulk CSV import.
+- **90 tools** covering reports, transactions, searches with typed filters,
+  bill payments, invoice and estimate PDFs, attachments, change tracking,
+  reconciliation, multi-company consolidation, diagnostics, and a safe bulk
+  CSV import.
 
 You do **not** need to know how to code. The setup below is copy-and-paste.
 
@@ -267,6 +268,9 @@ Each tool can be set to **Always allow** (✓), **Needs approval** (✋), or **N
 - **The two escape hatches differ:** `api_get` only reads, so it can be Always
   allow. `api_request` can post anything to QuickBooks; keep it on **Needs
   approval** (or Never).
+- **Firm-wide off switches:** set `QBO_DISABLE_WRITES=true` in `.env` and the
+  write tools are never registered at all (a read-only deployment for review
+  staff), or `QBO_DISABLE_DELETES=true` to hide just deletes and voids.
 
 You get quick answers on anything that just reads, and a confirmation step on
 anything that posts. Repeat for each client connector.

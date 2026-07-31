@@ -100,7 +100,7 @@ troubleshooting reference. After the first setup, adding a company needs no
 restart. Legacy per-company `qbo-<slug>` connectors still work; the scripts
 report them and support migration to the unified entry.
 
-## Tools (73)
+## Tools (90)
 
 **Company selection & diagnostics (4):** `list_companies`, `select_company`,
 `get_active_company`, `health_check`
@@ -111,19 +111,31 @@ report them and support migration to the unified entry.
 **Reconciliation & review (3):** `reconcile_bank_csv`,
 `find_duplicate_transactions`, `get_general_ledger_flat`
 
-**Search & lists (7):** `search_customers`, `search_vendors`, `search_items`,
-`search_accounts`, `get_bills`, `get_payments`, `get_estimates`
+**Search & lists (10):** `search_customers`, `search_vendors`, `search_items`,
+`search_accounts`, `search_terms`, `search_payment_methods`,
+`search_tax_codes`, `get_bills`, `get_payments`, `get_estimates` (all take
+typed, allowlisted `filters` plus sort)
 
 **AP payments & transfers (3):** `create_bill_payment`, `get_bill_payments`,
 `create_transfer`
 
 **Change tracking (1):** `get_changes_since` (QBO Change Data Capture, ~30 days)
 
-**Reports & reads (15):** `get_profit_and_loss`, `get_balance_sheet`,
+**Reports & reads (20):** `get_profit_and_loss`, `get_balance_sheet`,
 `get_cash_flow`, `get_aged_receivables`, `get_aged_payables`, `get_invoices`,
 `get_overdue_invoices`, `query`, `get_company_info`, `get_general_ledger`,
 `get_trial_balance`, `get_transaction_list`, `get_transaction_list_by_vendor`,
-`get_transaction_list_by_customer`, `get_transaction_list_with_splits`
+`get_transaction_list_by_customer`, `get_transaction_list_with_splits`,
+`get_customer_balance`, `get_sales_by_customer`, `get_vendor_balance`,
+`get_vendor_expenses`, `get_budgets`
+
+**Documents (2):** `get_invoice_pdf`, `get_estimate_pdf`
+
+**Setup entities (6):** `create_class`, `update_class`, `create_department`,
+`update_department`, `create_payment_method`, `create_term`
+
+**Danger zone (1):** `delete_transaction` (permanent; policy-checked and
+audit-logged)
 
 **Core writes (8):** `create_customer`, `update_customer`, `create_item`,
 `create_invoice`, `create_bill`, `create_account`, `send_invoice_email`,
@@ -187,6 +199,16 @@ report them and support migration to the unified entry.
   amount within a date tolerance; transfers and bill payments are not scanned.
 - Name-index lookups (fuzzy matching, suggestions) are cached for 60 seconds
   per company and entity; exact-name lookups always hit the API directly.
+- **Verb-category kill switches** (pattern from Intuit's MIT MCP server):
+  `QBO_DISABLE_WRITES=true` skips registering every write-capable tool;
+  `QBO_DISABLE_DELETES=true` skips only deletes/voids. Suppressed tools never
+  appear in the client. Read tools are always registered.
+- **Advanced search filters:** every search/list tool takes
+  `filters: [{field, value, operator}]` validated against a per-entity
+  allowlist of QBO's filterable columns (operators `=`, `<`, `>`, `<=`, `>=`,
+  `LIKE`, `IN`), plus `order_by`/`descending` on the name searches.
+- PDFs save under `exports/` by default (gitignored); cap the download size
+  with `QBO_PDF_MAX_BYTES`.
 - Tests: `npm test` (vitest). CI runs syntax checks, tests, and `npm audit`.
 - Item-based tools (purchase orders, item-based bills) need **purchasable**
   items (ones with an expense account).

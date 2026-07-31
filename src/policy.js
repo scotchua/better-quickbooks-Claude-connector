@@ -18,7 +18,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
-const cache = { mtimeMs: -1, policy: null };
+const cache = { path: null, mtimeMs: -1, policy: null };
 
 export function policyPath() {
   return process.env.QBO_POLICY_FILE || path.join(ROOT, "qbo-policy.json");
@@ -29,12 +29,16 @@ export async function loadPolicy() {
   try {
     const p = policyPath();
     const s = await stat(p);
-    if (cache.policy && cache.mtimeMs === s.mtimeMs) return cache.policy;
+    // Key the cache on path AND mtime: two different files written within the
+    // same millisecond must not serve each other's rules.
+    if (cache.policy && cache.path === p && cache.mtimeMs === s.mtimeMs) return cache.policy;
     const parsed = JSON.parse(await readFile(p, "utf8"));
+    cache.path = p;
     cache.mtimeMs = s.mtimeMs;
     cache.policy = parsed;
     return parsed;
   } catch {
+    cache.path = null;
     cache.mtimeMs = -1;
     cache.policy = null;
     return null;

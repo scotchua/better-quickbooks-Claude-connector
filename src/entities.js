@@ -167,3 +167,32 @@ export async function closedPeriodWarnings(company, dates) {
 export function withWarnings(payload, warnings) {
   return warnings?.length ? { ...payload, warnings } : payload;
 }
+
+// ---- advanced search filters --------------------------------------------------
+
+// Typed, allowlisted filters for the search/list tools (field allowlists follow
+// Intuit's documented filterable columns; the pattern follows Intuit's MIT
+// MCP server). Fields are validated against the allowlist, so only values are
+// interpolated, and those are escaped.
+const QUERY_OPERATORS = new Set(["=", "<", ">", "<=", ">=", "LIKE", "IN"]);
+
+function queryLiteral(v) {
+  return typeof v === "boolean" ? String(v) : `'${esc(v)}'`;
+}
+
+export function buildWhere(filters = [], allowedFields = []) {
+  return filters.map((f) => {
+    if (!allowedFields.includes(f.field)) {
+      throw new Error(`Field "${f.field}" is not filterable here. Filterable: ${allowedFields.join(", ")}.`);
+    }
+    const op = (f.operator || "=").toUpperCase();
+    if (!QUERY_OPERATORS.has(op)) throw new Error(`Unsupported operator "${f.operator}". Use ${[...QUERY_OPERATORS].join(", ")}.`);
+    if (op === "IN") {
+      const vals = Array.isArray(f.value) ? f.value : [f.value];
+      if (!vals.length) throw new Error(`IN filter on "${f.field}" needs at least one value.`);
+      return `${f.field} IN (${vals.map(queryLiteral).join(", ")})`;
+    }
+    if (Array.isArray(f.value)) throw new Error(`Array values require the IN operator (field "${f.field}").`);
+    return `${f.field} ${op} ${queryLiteral(f.value)}`;
+  });
+}

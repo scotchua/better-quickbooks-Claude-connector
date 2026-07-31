@@ -479,6 +479,29 @@ async function qboQuery(sql, { company } = {}) {
   return data.QueryResponse || {};
 }
 
+// Binary GET (invoice/estimate PDFs). Returns a Buffer, capped so a runaway
+// response cannot balloon memory (override with QBO_PDF_MAX_BYTES).
+async function qboRequestBinary(pathAndQuery, { company, accept = "application/pdf" } = {}) {
+  const tokens = await getValidTokens(company ?? DEFAULT_COMPANY);
+  const apiBase = apiBaseFor(tokens.environment);
+  const sep = pathAndQuery.includes("?") ? "&" : "?";
+  const url = `${apiBase}/v3/company/${tokens.realmId}${pathAndQuery}${sep}minorversion=${MINOR_VERSION}`;
+  const res = await qboFetch(url, {
+    headers: { Authorization: `Bearer ${tokens.access_token}`, Accept: accept },
+  }, { idempotent: true });
+  const tid = res.headers.get("intuit_tid") || undefined;
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`QBO API ${res.status} on GET ${pathAndQuery}: ${text.slice(0, 300)}${tid ? ` (intuit_tid: ${tid})` : ""}`);
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  const cap = Number(process.env.QBO_PDF_MAX_BYTES) || 50 * 1024 * 1024;
+  if (buf.length > cap) {
+    throw new Error(`Response is ${buf.length} bytes, above the ${cap}-byte cap (raise QBO_PDF_MAX_BYTES if this is expected).`);
+  }
+  return buf;
+}
+
 // Multipart upload to /v3/company/{realmId}/upload (the Attachable file endpoint).
 // `formData` is a FormData with the file_metadata_0N / file_content_0N parts;
 // fetch sets the multipart boundary header itself.
@@ -675,6 +698,7 @@ export {
   getValidTokens,
   qboRequest,
   qboQuery,
+  qboRequestBinary,
   qboUpload,
   getRealmId,
   runAuthorizationFlow,
