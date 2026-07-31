@@ -128,7 +128,7 @@ targeted nudge if either is missing.
 The new connector only appears after a full relaunch — **Quit** Claude Desktop
 (Cmd-Q, not just closing the window) and reopen it. Tell the user this explicitly;
 it's the most common "why isn't it showing up" cause. After relaunch, the company
-appears under Settings → Connectors as `qbo-<slug>` with all 55 tools.
+appears under Settings → Connectors as `qbo-<slug>` with all 66 tools.
 
 > Note: the currently-running MCP server in *this* session reads whichever token
 > file its own `QBO_COMPANY` points at, so a brand-new connector won't be callable

@@ -69,7 +69,7 @@ Windows (use `node.exe`, and **double** every backslash in JSON):
 }
 ```
 Fully **quit and reopen** Claude Desktop. `qbo` appears under
-**Settings → Connectors** with all 55 tools.
+**Settings → Connectors** with all 66 tools.
 
 ## Multiple companies (one connector)
 
@@ -99,10 +99,18 @@ that a company is both authorized and registered) — with Python helpers
 (`scripts/list_companies.py`, `scripts/register_connector.py`) and a
 troubleshooting reference.
 
-## Tools (55)
+## Tools (66)
 
 **Company selection & diagnostics (4):** `list_companies`, `select_company`,
 `get_active_company`, `health_check`
+
+**Search & lists (7):** `search_customers`, `search_vendors`, `search_items`,
+`search_accounts`, `get_bills`, `get_payments`, `get_estimates`
+
+**AP payments & transfers (3):** `create_bill_payment`, `get_bill_payments`,
+`create_transfer`
+
+**Change tracking (1):** `get_changes_since` (QBO Change Data Capture, ~30 days)
 
 **Reports & reads (15):** `get_profit_and_loss`, `get_balance_sheet`,
 `get_cash_flow`, `get_aged_receivables`, `get_aged_payables`, `get_invoices`,
@@ -136,6 +144,28 @@ troubleshooting reference.
 ## Notes
 
 - Line-item tools accept account/item/customer references by **name or Id**.
+  A near-miss on a name (case/spacing) resolves when unambiguous; otherwise the
+  error lists close matches.
+- Line items accept an optional **`class`**; sales lines accept **`tax_code`**
+  (TAX/NON or a TaxCode name); most posting tools accept a header **`location`**
+  (department). All require the matching QBO tracking feature to be enabled.
+- **Token files are encrypted at rest** (AES-256-GCM). The master key lives in
+  the macOS Keychain / Windows DPAPI, or a `0600` `.qbo-key` file elsewhere.
+  `QBO_TOKEN_ENCRYPTION=off` keeps legacy plaintext. Legacy files migrate to
+  encrypted automatically on first read.
+- **Every write is audit-logged** to `audit-log/audit-YYYY-MM.jsonl` (tool-agnostic,
+  hooked at the API layer), including Intuit's `intuit_tid` trace id. `QBO_AUDIT=off`
+  disables; `QBO_AUDIT_DIR` relocates.
+- **Closed-period guardrail:** writes dated on or before the company's
+  books-closed date return a warning (`QBO_CLOSED_PERIOD=block` refuses instead).
+- **Offboarding:** `npm run disconnect -- <slug>` revokes the OAuth grant with
+  Intuit, then deletes the token file.
+- List tools return **compact rows** by default; pass `verbose: true` for full
+  QBO entities. Results paginate up to 1,000 rows with a `truncated` flag.
+- `import_transactions_from_csv` is sign-aware (credits are never imported as
+  expenses), normalizes dates, and is **idempotent**: each import is journaled
+  locally so a re-run after a failure skips rows that already posted.
+- Tests: `npm test` (vitest). CI runs syntax checks, tests, and `npm audit`.
 - Item-based tools (purchase orders, item-based bills) need **purchasable**
   items (ones with an expense account).
 - `import_transactions_from_csv` supports a `dry_run` preview; live posting is
@@ -146,10 +176,21 @@ troubleshooting reference.
 
 ## Architecture
 
-- `src/qbo.js` — OAuth (authorize / refresh), per-company token resolution,
-  authenticated request + multipart upload helpers, company discovery.
-- `src/index.js` — the MCP server: tool definitions, company-resolution +
-  write-gate, line-item builders.
+- `src/qbo.js`: OAuth (authorize / refresh / revoke), per-company token
+  resolution, retry/timeout policy, authenticated request + upload helpers,
+  company discovery, audit hook.
+- `src/index.js`: the MCP server: tool definitions, company resolution and
+  the write-gate.
+- `src/entities.js`: entity lookups, tolerant name resolution with
+  suggestions, paginated queries, closed-period guardrail.
+- `src/lines.js`: line-item schemas and builders (class/location/tax aware).
+- `src/secure-store.js`: AES-256-GCM token encryption and master-key
+  providers (Keychain, DPAPI, key file).
+- `src/audit.js`: append-only JSONL write audit log.
+- `src/csv.js`: bank CSV parsing, import planning, idempotency journal.
+- `src/compact.js`: trimmed list-response shapes.
+- `src/util.js`: pure helpers (escaping, id validation, balance checks).
+- `test/`: vitest unit tests; `.github/workflows/ci.yml`: CI.
 
 ## Troubleshooting
 

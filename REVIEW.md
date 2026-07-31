@@ -71,6 +71,8 @@ The review itself changed no code; findings reference the codebase at commit `11
 
 ### Medium-Term Improvements (est. 1-3 weeks each)
 
+**Status (2026-07-31): implemented on this branch after maintainer approval**, with two scoped exceptions: the full TypeScript migration (helpers now live in focused modules; typing remains open) and the unified-model docs rewrite of SETUP_GUIDE and the bundled skill (tracked under Major).
+
 - Local append-only write audit log (JSONL): timestamp, tool, company, realm, entity, Id, DocNumber, amount. Firms need this for engagement documentation. (Persistence approach approved; see Decisions.)
 - Encrypted-at-rest token storage (required per Decisions): AES-256-GCM via `node:crypto`, master key in an OS secret store reached without native dependencies (macOS `security` CLI, Windows DPAPI via PowerShell), permission-restricted key file as fallback; includes migration from the plaintext files.
 - CSV import idempotency: stamp each Purchase's `PrivateNote` with an import-batch marker, pre-check for duplicates, record an import journal, support resume. Also fix sign handling: `Math.abs()` on amounts turns bank credits into expenses (`src/index.js:952`), and raw CSV dates pass through unvalidated (`src/index.js:983`).

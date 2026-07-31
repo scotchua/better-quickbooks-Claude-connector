@@ -26,8 +26,9 @@ This tool fixes both:
   no restarts.
 - **Read *and* write.** Create invoices, bills, journal entries, and more — the
   things you actually do in QuickBooks.
-- **55 tools** covering reports, transactions, lists, attachments, diagnostics,
-  and a safe bulk CSV import.
+- **66 tools** covering reports, transactions, searches and lists, bill
+  payments, attachments, change tracking, diagnostics, and a safe bulk CSV
+  import.
 
 You do **not** need to know how to code. The setup below is copy-and-paste.
 
@@ -40,10 +41,12 @@ You do **not** need to know how to code. The setup below is copy-and-paste.
 - **Pull reports:** Profit & Loss, Balance Sheet, Cash Flow, Trial Balance,
   General Ledger, A/R and A/P aging, overdue invoices.
 - **Enter and edit work:** customers, vendors, items, accounts, invoices, bills,
-  expenses, estimates, sales receipts, credit memos, payments, deposits, and
-  journal entries.
-- **Speed up month-end:** import a bank CSV (with a preview first), attach source
-  documents, and run collections.
+  bill payments, transfers, expenses, estimates, sales receipts, credit memos,
+  payments, deposits, and journal entries, with class, location, and sales-tax
+  tagging on line items.
+- **Speed up month-end:** import a bank CSV (with a preview first, sign-aware,
+  and safe to re-run), attach source documents, run collections, and pull
+  "what changed since" reports for any entity.
 - **Work across clients:** switch between companies in one connector, or name one
   per request.
 
@@ -99,6 +102,15 @@ QuickBooks (Intuit). That means:
   file, so the code can be shared safely.
 - **Secrets never show up in logs.** The app writes its notes to a hidden channel
   (not the main output), and it never prints your keys or tokens.
+- **Login passes are scrambled on disk.** Each company's tokens are encrypted
+  (AES-256-GCM) before they are saved. The unlock key lives in your Mac's
+  Keychain or Windows protected storage, so a copied token file is useless on
+  its own. Offboarding a client? `npm run disconnect -- <nickname>` revokes the
+  access with Intuit and removes the file.
+- **Every change is written down.** Each action that changes your books is
+  recorded in a local log (`audit-log/`), so you can always answer "what did
+  Claude post, and when." Writes dated into a closed period come back with a
+  warning.
 
 ### Keeping the login safe
 
