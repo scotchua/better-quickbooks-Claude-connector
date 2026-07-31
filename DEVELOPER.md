@@ -92,17 +92,24 @@ never auto-pick — see the **Security** section of the README.
 
 Bundled at [`.claude/skills/add-qbo-company/`](.claude/skills/add-qbo-company/).
 Invoke it in Claude Code with `/add-qbo-company` (or ask to "add another
-QuickBooks company"). It handles the three moving parts — **authorize**
-(browser login → token file), **register** (adds the connector to the Claude
-Desktop config, with backup + idempotent edits), and **verify** (cross-checks
-that a company is both authorized and registered) — with Python helpers
-(`scripts/list_companies.py`, `scripts/register_connector.py`) and a
-troubleshooting reference.
+QuickBooks company"). It authorizes the company (browser login writes the token
+file), ensures the single unified `qbo` connector is registered (first time
+only, with backup + idempotent config edits), and verifies both, using Python
+helpers (`scripts/list_companies.py`, `scripts/register_connector.py`) and a
+troubleshooting reference. After the first setup, adding a company needs no
+restart. Legacy per-company `qbo-<slug>` connectors still work; the scripts
+report them and support migration to the unified entry.
 
-## Tools (66)
+## Tools (73)
 
 **Company selection & diagnostics (4):** `list_companies`, `select_company`,
 `get_active_company`, `health_check`
+
+**Fleet / multi-company (3):** `get_consolidated_profit_and_loss`,
+`get_consolidated_balance_sheet`, `create_journal_entry_multi`
+
+**Reconciliation & review (3):** `reconcile_bank_csv`,
+`find_duplicate_transactions`, `get_general_ledger_flat`
 
 **Search & lists (7):** `search_customers`, `search_vendors`, `search_items`,
 `search_accounts`, `get_bills`, `get_payments`, `get_estimates`
@@ -135,11 +142,14 @@ troubleshooting reference.
 
 **People & items (3):** `create_employee`, `create_time_activity`, `update_item`
 
-**Attachments & advanced (3):** `attach_file`, `get_attachments`, `api_request`
+**Attachments & advanced (4):** `attach_file`, `get_attachments`, `api_get`,
+`api_request`
 
-> `api_request` is the escape hatch for anything not wrapped: pass a path under
-> `/v3/company/{realmId}` (e.g. `/reports/ProfitAndLossDetail?...`,
-> `/query?query=SELECT * FROM Bill`) and it handles auth, realm, and minorversion.
+> `api_get` and `api_request` are the escape hatches for anything not wrapped:
+> pass a path under `/v3/company/{realmId}` (e.g.
+> `/reports/ProfitAndLossDetail?...`, `/query?query=SELECT * FROM Bill`) and
+> auth, realm, and minorversion are handled. `api_get` is read-only (safe to
+> always-allow); `api_request` can POST and belongs behind approval.
 
 ## Notes
 
@@ -165,6 +175,18 @@ troubleshooting reference.
 - `import_transactions_from_csv` is sign-aware (credits are never imported as
   expenses), normalizes dates, and is **idempotent**: each import is journaled
   locally so a re-run after a failure skips rows that already posted.
+- **Per-company policies** (optional `qbo-policy.json`, see
+  `qbo-policy.example.json`; `QBO_POLICY_FILE` overrides the path): `read_only`
+  companies, `max_write_amount` ceilings, and a `min_txn_date` floor, enforced
+  centrally at the API layer so every write tool (including `api_request`)
+  obeys them.
+- **Fleet tools** merge per-company report trees by account name;
+  `create_journal_entry_multi` requires an explicit company list and returns
+  per-company results.
+- **Reconciliation** matches statement rows to Purchases/Deposits on exact
+  amount within a date tolerance; transfers and bill payments are not scanned.
+- Name-index lookups (fuzzy matching, suggestions) are cached for 60 seconds
+  per company and entity; exact-name lookups always hit the API directly.
 - Tests: `npm test` (vitest). CI runs syntax checks, tests, and `npm audit`.
 - Item-based tools (purchase orders, item-based bills) need **purchasable**
   items (ones with an expense account).
@@ -188,6 +210,11 @@ troubleshooting reference.
   providers (Keychain, DPAPI, key file).
 - `src/audit.js`: append-only JSONL write audit log.
 - `src/csv.js`: bank CSV parsing, import planning, idempotency journal.
+- `src/reports.js`: report-tree flattening, multi-company consolidation, flat
+  GL export with review flags.
+- `src/reconcile.js`: statement-vs-register matching, duplicate detection.
+- `src/policy.js`: per-company write policies (read-only, amount ceiling, date
+  floor), enforced in `qboRequest`.
 - `src/compact.js`: trimmed list-response shapes.
 - `src/util.js`: pure helpers (escaping, id validation, balance checks).
 - `test/`: vitest unit tests; `.github/workflows/ci.yml`: CI.

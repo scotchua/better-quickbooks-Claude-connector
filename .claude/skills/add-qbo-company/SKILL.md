@@ -2,151 +2,140 @@
 name: add-qbo-company
 description: >-
   Connect an additional QuickBooks Online company (a second/third "accounting
-  file" or realm) to this local qbo-mcp-server so multiple companies are usable
-  at once, each as its own qbo-<slug> connector. Use this whenever the user wants
-  to add, connect, hook up, onboard, or authorize another QBO company / client /
-  business / sandbox / production file — phrasings like "add another company",
-  "connect a second QuickBooks", "hook up my client's books", "authorize a new
-  realm", "set up production QBO", or "I need both companies at once". Also use it
-  to switch which company is active, or to check which companies are already
-  wired up. This is the safe, foolproof path — prefer it over hand-running
-  npm run connect or hand-editing the Claude Desktop config.
+  file" or realm) to this local qbo-mcp-server. The unified model means every
+  authorized company is reachable through the single `qbo` connector; adding a
+  company is authorize-and-go, with no restart after the first setup. Use this
+  whenever the user wants to add, connect, hook up, onboard, or authorize
+  another QBO company / client / business / sandbox / production file;
+  phrasings like "add another company", "connect a second QuickBooks", "hook up
+  my client's books", "authorize a new realm", "set up production QBO", or "I
+  need both companies at once". Also use it to check which companies are wired
+  up, or to remove (disconnect) one. Prefer it over hand-running npm run
+  connect or hand-editing the Claude Desktop config.
 ---
 
 # Add a QBO company
 
-This server can talk to many QuickBooks companies at once. Each company is
-selected by the `QBO_COMPANY` env var, which maps to its own `tokens.<slug>.json`
-file (`src/qbo.js`). One Claude Desktop connector per company (`qbo-<slug>`)
-means every company shows up as its own toolset, all live simultaneously.
+This server talks to many QuickBooks companies through **one** `qbo` connector.
+Each company is a `tokens.<slug>.json` file (credentials encrypted at rest); the
+company is chosen at runtime with `select_company` or a per-call `company`
+argument. Adding a company has two moving parts, and only the first needs a
+human:
 
-Adding one has exactly three moving parts, and only the middle one needs a human:
-
-1. **Authorize** — a browser login to Intuit that writes `tokens.<slug>.json`.
-2. **Register** — add a `qbo-<slug>` connector to the Claude Desktop config.
-3. **Restart** — relaunch Claude Desktop so it loads the new connector.
-
-The scripts in this skill make steps 2 and validation bulletproof. Follow the
-steps in order; do not skip the verification checkpoints — a company that's
-authorized but not registered (or vice-versa) silently does nothing, and the
-checkpoints catch exactly that.
+1. **Authorize**: a browser login to Intuit that writes `tokens.<slug>.json`.
+2. **Register (first time only)**: make sure the single `qbo` connector exists
+   in the Claude Desktop config. Once it does, new companies are live the
+   moment they're authorized, with no restart.
 
 ## Before you start
 
 Confirm you're operating on this project. Resolve `PROJECT_DIR` (the
 `qbo-mcp-server` folder, e.g. `~/Desktop/qbo-mcp-server`) and `NODE` (absolute
-node path — get it with `which node`, since Claude Desktop can't rely on `$PATH`).
-Use absolute paths everywhere; the Claude Desktop config requires them.
+node path via `which node`, since Claude Desktop can't rely on `$PATH`). Use
+absolute paths everywhere; the Claude Desktop config requires them.
 
-## Step 1 — Gather the details
+## Step 1: Gather the details
 
-Ask the user for these (don't guess — a wrong environment silently hits the wrong
-API, and a bad slug creates a phantom company):
+Ask the user (don't guess; a wrong environment silently hits the wrong API, and
+a bad slug creates a phantom company):
 
-- **Slug**: a short, lowercase, `a-z0-9-` label identifying the company (e.g.
-  `8315`, `acme`, `client-bakery`). This becomes the token filename and the
-  connector name. Keep it stable — renaming later means re-authorizing.
-- **Environment**: `sandbox` or `production`. Sandboxes are Intuit's test
-  companies; production is real books. If the user is unsure and the email/company
-  is a real business, it's production.
+- **Slug**: a short, lowercase, `a-z0-9-` label (e.g. `8315`, `acme`,
+  `client-bakery`). This becomes the token filename and the name used in
+  `select_company`. Keep it stable.
+- **Environment**: `sandbox` or `production`. If the user is unsure and it's a
+  real business, it's production.
 - **For production only**: that app's own `QBO_CLIENT_ID` and
-  `QBO_CLIENT_SECRET`, since sandbox keys can't reach production. Ask the user to
-  paste them, or confirm the `.env` values already point at the production app.
-  **Never type the user's credentials into the Intuit login yourself** — that's
-  theirs to enter in the browser (step 2).
+  `QBO_CLIENT_SECRET`, since sandbox keys can't reach production. Have the user
+  put them in `.env` themselves (or use per-run env overrides); do not ask them
+  to paste secrets into the conversation, and **never type the user's Intuit
+  login yourself**; that's theirs to enter in the browser.
 
-Sanity-check the slug isn't already taken:
+Sanity-check the current state first:
 ```bash
 python3 .claude/skills/add-qbo-company/scripts/list_companies.py --project-dir "$PROJECT_DIR"
 ```
-If the slug already appears as authorized, adding it again re-authorizes/overwrites
-it — confirm that's the intent before proceeding.
+If the slug already shows as authorized, re-running connect refreshes it in
+place; confirm that's the intent.
 
-## Step 2 — Authorize (the human's part)
+## Step 2: Authorize (the human's part)
 
-Run the connect flow with `QBO_COMPANY` set so tokens land in the right file. Run
-it **in the background** — it starts a localhost:3000 server and blocks until the
-browser callback arrives.
+Run the connect flow with `QBO_COMPANY` set so tokens land in the right file.
+Run it **in the background**; it starts a localhost:3000 listener and blocks
+until the browser callback arrives.
 
-Sandbox (uses `.env` keys as-is):
 ```bash
 cd "$PROJECT_DIR" && QBO_COMPANY=<slug> npm run connect
 ```
 
-Production (override keys + environment for just this run):
+Adding several at once? Use the batch flow (log in once, pick + Allow each):
 ```bash
-cd "$PROJECT_DIR" && QBO_COMPANY=<slug> QBO_ENVIRONMENT=production \
-  QBO_CLIENT_ID=<prod-id> QBO_CLIENT_SECRET=<prod-secret> npm run connect
+cd "$PROJECT_DIR" && npm run connect:batch
 ```
 
-The connect flow tries to auto-open the browser, but don't rely on that alone —
-auto-open can silently misfire (no default browser, a sandboxed shell). To make
-this foolproof, **always give the user the link too**: read the command's output,
-lift the line between the `AUTHORIZE_URL>>> ... <<<` delimiters, and present it as
-a clickable Markdown link right away. Then tell the user, in plain terms:
-> Your browser should open to Intuit — if it doesn't, click this link: <link>.
-> Log into the company you want, pick the right one if prompted, and click
-> **Allow**. You'll see "✅ QuickBooks connected" — close that tab.
+For production, override environment (and keys if `.env` holds sandbox keys)
+for just this run:
+```bash
+cd "$PROJECT_DIR" && QBO_COMPANY=<slug> QBO_ENVIRONMENT=production npm run connect
+```
 
-Because the command runs in the background and blocks on the callback, read its
-output file a second or two after launching to grab that URL; don't wait for the
-command to finish (it won't, until the user logs in).
+The connect flow tries to auto-open the browser, but don't rely on that alone.
+Read the command's output a second or two after launching, lift the URL between
+the `AUTHORIZE_URL>>> ... <<<` delimiters, and present it as a clickable link:
+> Your browser should open to Intuit. If it doesn't, click this link, log into
+> the company you want, pick the right one if prompted, and click **Allow**.
+> You'll see "QuickBooks connected"; close that tab.
 
-Only one `connect` can run at a time (they all use port 3000), so never launch two
+Only one `connect` can run at a time (they all use port 3000); never launch two
 in parallel.
 
-**Checkpoint** — confirm the token file was actually written and shows the
-expected realm/environment before moving on:
+**Checkpoint**: confirm the token file was written with the expected
+realm/environment:
 ```bash
 python3 .claude/skills/add-qbo-company/scripts/list_companies.py --project-dir "$PROJECT_DIR"
 ```
-The new slug should read `AUTHORIZED=yes` with the right `ENV`. If token exchange
-failed for a production company, it's almost always sandbox keys or an
-unregistered redirect URI — see [references/troubleshooting.md](references/troubleshooting.md).
+The new slug should read `AUTHORIZED=yes` with the right `ENV`. If token
+exchange failed for a production company, it's almost always sandbox keys or an
+unregistered redirect URI; see
+[references/troubleshooting.md](references/troubleshooting.md).
 
-## Step 3 — Register the connector
+## Step 3: Ensure the unified connector exists (first time only)
 
-Let the script edit the Claude Desktop config — it backs up first, refuses to
-touch corrupt JSON, and is idempotent, which hand-editing is not:
+If `list_companies.py` says the unified connector is missing, register it:
 ```bash
 python3 .claude/skills/add-qbo-company/scripts/register_connector.py \
-  --slug <slug> --project-dir "$PROJECT_DIR" --node "$NODE"
+  --project-dir "$PROJECT_DIR" --node "$NODE"
 ```
-For production, pass the same key overrides so the connector runs against
-production every time it launches (config `env` overrides `.env`):
-```bash
-  ... --env QBO_ENVIRONMENT=production \
-      --env QBO_CLIENT_ID=<prod-id> --env QBO_CLIENT_SECRET=<prod-secret>
-```
+The script backs up the config, refuses to touch corrupt JSON, and is
+idempotent. It registers ONE `qbo` entry with no per-company env; the company
+is picked at runtime.
 
-**Checkpoint** — run `list_companies.py` once more. The slug should now read
-`AUTHORIZED=yes` **and** `REGISTERED=yes`. Both must be `yes`; the script prints a
-targeted nudge if either is missing.
+**Checkpoint**: `list_companies.py` should now show `unified connector: yes`.
 
-## Step 4 — Restart Claude Desktop
+## Step 4: Restart only if the connector was just created
 
-The new connector only appears after a full relaunch — **Quit** Claude Desktop
-(Cmd-Q, not just closing the window) and reopen it. Tell the user this explicitly;
-it's the most common "why isn't it showing up" cause. After relaunch, the company
-appears under Settings → Connectors as `qbo-<slug>` with all 66 tools.
-
-> Note: the currently-running MCP server in *this* session reads whichever token
-> file its own `QBO_COMPANY` points at, so a brand-new connector won't be callable
-> here until Desktop is restarted. That's expected.
+- Connector already existed: **no restart**. The new company is live now; prove
+  it with the `health_check` or `list_companies` tool in Claude Desktop.
+- Connector newly registered: Claude Desktop needs one full relaunch (**Quit**
+  with Cmd-Q, not just closing the window) to load it.
 
 ## Wrap up
 
-Summarize for the user: the slug, its realmId + environment, the connector name,
-and the reminder that its books are separate from the other companies'. If they
-added a production company, remind them those are **real** books — writes
-(invoices, bills) post for real.
+Summarize for the user: the slug, its realmId and environment, and that they
+select it with *"work on <slug>"* (or a `company` argument on any call). If they
+added a production company, remind them those are **real** books; writes post
+for real, and per-company guardrails can be set in `qbo-policy.json`.
 
 ## Related tasks
 
-- **Switch the default/legacy `qbo` connector** to a different company: overwrite
-  `tokens.json` via `npm run connect` with no `QBO_COMPANY` set. This overwrites,
-  so back up first (`cp tokens.json tokens.<oldslug>.json`).
-- **Remove a company**: delete its `tokens.<slug>.json` and remove the
-  `qbo-<slug>` block from the Claude Desktop config, then restart.
+- **Switch companies while working**: just say *"work on <slug>"*
+  (`select_company`); nothing to reconfigure.
+- **Remove a company**: `npm run disconnect -- <slug>`. This revokes the OAuth
+  grant with Intuit and deletes the token file, which is the complete
+  offboarding step. If a legacy `qbo-<slug>` connector entry exists, remove it
+  from the config too.
+- **Legacy per-company connectors** (`qbo-<slug>` entries with `QBO_COMPANY`
+  baked in): they still work, but the unified connector replaces them. To
+  migrate, register the unified connector once, remove the per-company entries,
+  and restart Claude Desktop.
 - **Deeper failures** (port in use, refresh-token expiry, wrong realm): see
   [references/troubleshooting.md](references/troubleshooting.md).

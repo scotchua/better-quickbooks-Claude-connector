@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { encryptionEnabled, encryptTokens, decryptTokens, isEncrypted } from "./secure-store.js";
 import { record as auditRecord, summarizeResponse } from "./audit.js";
+import { checkWritePolicy } from "./policy.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -417,6 +418,10 @@ async function getValidTokens(slug, { allowInteractive = false } = {}) {
 // `company` option selects which company's tokens (and thus realmId + API host)
 // to use; omit it to use DEFAULT_COMPANY.
 async function qboRequest(pathAndQuery, { method = "GET", body, company } = {}) {
+  // Central policy gate: every write, from any tool, passes through here.
+  if (method !== "GET") {
+    await checkWritePolicy(sanitizeSlug(company ?? DEFAULT_COMPANY), body ?? null);
+  }
   const tokens = await getValidTokens(company ?? DEFAULT_COMPANY);
   const apiBase = apiBaseFor(tokens.environment);
   const sep = pathAndQuery.includes("?") ? "&" : "?";

@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Show every QBO company this server knows about and whether it's wired into
-Claude Desktop — a fast sanity check before/after adding one.
+"""Show every authorized QBO company and how Claude Desktop reaches them.
 
-Cross-references three things that must line up for a company to actually work:
-  1. tokens.<slug>.json on disk (the authorization)
-  2. its realmId + environment
-  3. a matching qbo-<slug> connector in the Claude Desktop config
+The unified model registers ONE `qbo` connector that serves every
+tokens.<slug>.json (token files keep realmId/environment as plaintext metadata
+even when credentials are encrypted, so this scan works either way). Legacy
+setups registered one qbo-<slug> connector per company; those are reported too.
 
 Usage: list_companies.py --project-dir /path/to/qbo-mcp-server
 """
@@ -13,13 +12,20 @@ import argparse
 import glob
 import json
 import os
+import platform
 import sys
 
 
 def config_path() -> str:
-    return os.path.expanduser(
-        "~/Library/Application Support/Claude/claude_desktop_config.json"
-    )
+    home = os.path.expanduser("~")
+    system = platform.system()
+    if system == "Darwin":
+        return os.path.join(home, "Library", "Application Support", "Claude",
+                            "claude_desktop_config.json")
+    if system == "Windows":
+        appdata = os.environ.get("APPDATA", os.path.join(home, "AppData", "Roaming"))
+        return os.path.join(appdata, "Claude", "claude_desktop_config.json")
+    return os.path.join(home, ".config", "Claude", "claude_desktop_config.json")
 
 
 def main() -> int:
@@ -29,6 +35,7 @@ def main() -> int:
     args = p.parse_args()
 
     proj = os.path.abspath(args.project_dir)
+    index_js = os.path.join(proj, "src", "index.js")
 
     # Token files: tokens.<slug>.json (skip the legacy/default tokens.json).
     tokens = {}
@@ -44,39 +51,54 @@ def main() -> int:
         except Exception as e:
             tokens[slug] = (f"<unreadable: {e}>", "?")
 
-    # Registered connectors.
+    # Connectors: unified (points at this project's index.js, no QBO_COMPANY)
+    # and legacy per-company (has QBO_COMPANY).
     path = args.config or config_path()
-    registered = set()
+    unified = None
+    legacy = set()
     if os.path.isfile(path):
         try:
             with open(path) as f:
                 cfg = json.load(f)
             for key, entry in cfg.get("mcpServers", {}).items():
+                argv = entry.get("args", [])
+                if not any(str(a).endswith(os.path.join("src", "index.js")) for a in argv):
+                    continue
                 env = entry.get("env", {})
                 if "QBO_COMPANY" in env:
-                    registered.add(env["QBO_COMPANY"])
+                    legacy.add(env["QBO_COMPANY"])
+                else:
+                    unified = key
         except json.JSONDecodeError as e:
             print(f"WARNING: Claude Desktop config is not valid JSON ({e})", file=sys.stderr)
 
-    slugs = sorted(set(tokens) | registered)
+    print(f"unified connector: {'yes (' + unified + ')' if unified else 'NO'}")
+
+    slugs = sorted(set(tokens) | legacy)
     if not slugs:
         print("No named companies found yet. Run the skill to add one.")
+        if not unified:
+            print("Then register the unified connector with register_connector.py.")
         return 0
 
-    print(f"{'COMPANY':<14} {'AUTHORIZED':<11} {'REGISTERED':<11} {'ENV':<11} REALMID")
+    print(f"\n{'COMPANY':<14} {'AUTHORIZED':<11} {'ENV':<11} {'REALMID':<18} LEGACY-CONNECTOR")
     for slug in slugs:
-        realm, envn = tokens.get(slug, ("—", "—"))
+        realm, envn = tokens.get(slug, ("-", "-"))
         authed = "yes" if slug in tokens else "NO"
-        reg = "yes" if slug in registered else "NO"
-        print(f"{slug:<14} {authed:<11} {reg:<11} {envn:<11} {realm}")
+        leg = "yes" if slug in legacy else "-"
+        print(f"{slug:<14} {authed:<11} {envn:<11} {str(realm):<18} {leg}")
 
-    # Gentle nudges for the two half-configured states.
+    # Nudges for the common half-configured states.
+    if not unified:
+        print("\n  ! No unified `qbo` connector registered. Run register_connector.py "
+              "once, then restart Claude Desktop.")
     for slug in slugs:
-        if slug in tokens and slug not in registered:
-            print(f"\n  ! {slug}: authorized but no connector — run register_connector.py.")
-        if slug in registered and slug not in tokens:
-            print(f"\n  ! {slug}: connector exists but not authorized — run "
-                  f"`QBO_COMPANY={slug} npm run connect`.")
+        if slug in legacy and slug not in tokens:
+            print(f"\n  ! {slug}: legacy connector exists but not authorized. Run "
+                  f"`QBO_COMPANY={slug} npm run connect` or remove the entry.")
+    if legacy and unified:
+        print("\n  * Legacy qbo-<slug> connectors still exist. The unified connector "
+              "covers them; consider removing the per-company entries.")
     return 0
 
 

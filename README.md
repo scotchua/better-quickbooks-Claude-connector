@@ -26,9 +26,9 @@ This tool fixes both:
   no restarts.
 - **Read *and* write.** Create invoices, bills, journal entries, and more — the
   things you actually do in QuickBooks.
-- **66 tools** covering reports, transactions, searches and lists, bill
-  payments, attachments, change tracking, diagnostics, and a safe bulk CSV
-  import.
+- **73 tools** covering reports, transactions, searches and lists, bill
+  payments, attachments, change tracking, reconciliation, multi-company
+  consolidation, diagnostics, and a safe bulk CSV import.
 
 You do **not** need to know how to code. The setup below is copy-and-paste.
 
@@ -48,7 +48,12 @@ You do **not** need to know how to code. The setup below is copy-and-paste.
   and safe to re-run), attach source documents, run collections, and pull
   "what changed since" reports for any entity.
 - **Work across clients:** switch between companies in one connector, or name one
-  per request.
+  per request. Run a consolidated P&L or Balance Sheet across every client at
+  once, or post the same journal entry (like a monthly management fee) to many
+  files in one call.
+- **Review the books:** reconcile a bank statement against the register, scan
+  for duplicate transactions, and pull a flat general ledger with review flags
+  (weekend postings, large or round amounts, journal entries).
 
 ---
 
@@ -226,10 +231,12 @@ npm run connect:batch                 # keeps asking "add another?"
 npm run connect:batch -- --count 50   # or do a set number in a row
 ```
 
-**Step 7 — Tell Claude Desktop about the app.**
+**Step 7 — Tell Claude Desktop about the app (once, ever).**
 The easiest way is to let Claude do it for you: open **Claude Code** and type
-`/add-qbo-company`, then follow the prompts. It sets everything up and checks it
-worked. (If you'd rather do it by hand, see *Setup (quick reference)* below.)
+`/add-qbo-company`, then follow the prompts. It registers a single **`qbo`**
+connector that serves every company you connect, now or later, and checks that
+it worked. (If you'd rather do it by hand, see *Setup (quick reference)* in
+DEVELOPER.md.) After this one-time step, adding more companies needs no restart.
 
 **Step 8 — Restart Claude Desktop.**
 - **Mac:** Quit Claude Desktop completely (`Cmd + Q`), then open it again.
@@ -255,8 +262,11 @@ Each tool can be set to **Always allow** (✓), **Needs approval** (✋), or **N
   loss, Get balance sheet, Get cash flow, Get aged receivables, Get invoices.*
 - **Write tools → Needs approval.** They *change* the books, so keep a human in
   the loop — Claude pauses and asks before each. Examples: *Create invoice, Create
-  bill, Create journal entry, Send invoice email, Void invoice, Import
-  transactions from CSV.*
+  bill, Create bill payment, Create journal entry, Send invoice email, Void
+  invoice, Import transactions from CSV.*
+- **The two escape hatches differ:** `api_get` only reads, so it can be Always
+  allow. `api_request` can post anything to QuickBooks; keep it on **Needs
+  approval** (or Never).
 
 You get quick answers on anything that just reads, and a confirmation step on
 anything that posts. Repeat for each client connector.

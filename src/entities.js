@@ -33,9 +33,21 @@ export function nameFieldFor(entity) {
 }
 
 // All {Id, name} pairs for an entity (capped at 1000) for tolerant matching.
+// Cached briefly per company+entity: multi-line builders and suggestion
+// lookups otherwise refetch the same index many times in one tool call.
+// Exact-match lookups always hit the API directly, so a just-created record
+// resolves immediately; only fuzzy matching and suggestions can lag the TTL.
+const nameIndexCache = new Map(); // key -> { at, rows }
+const NAME_INDEX_TTL_MS = 60_000;
+
 async function nameIndex(entity, company, nameField) {
+  const key = `${company ?? ""}|${entity}|${nameField}`;
+  const hit = nameIndexCache.get(key);
+  if (hit && Date.now() - hit.at < NAME_INDEX_TTL_MS) return hit.rows;
   const { rows } = await qboQueryAll(`SELECT Id, ${nameField} FROM ${entity}`, entity, { company });
-  return rows.map((r) => ({ id: r.Id, name: r[nameField] ?? "" }));
+  const mapped = rows.map((r) => ({ id: r.Id, name: r[nameField] ?? "" }));
+  nameIndexCache.set(key, { at: Date.now(), rows: mapped });
+  return mapped;
 }
 
 // Find by exact name, then fall back to a case/whitespace-insensitive match

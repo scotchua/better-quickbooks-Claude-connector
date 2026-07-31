@@ -33,17 +33,28 @@ kill <pid>           # stop it, then re-run connect
 
 ## Company authorized but tools return nothing / wrong data in Claude Desktop
 
-- **Didn't restart.** New connectors load only on a full relaunch (Cmd-Q). Closing
-  the window isn't enough.
-- **Wrong slug in the connector.** Confirm the `env.QBO_COMPANY` in the config
-  matches the `tokens.<slug>.json` filename exactly. `list_companies.py` flags
-  this as REGISTERED but not AUTHORIZED (or vice-versa).
+- **Unified connector missing.** Run `list_companies.py`; if it says
+  `unified connector: NO`, register it once with `register_connector.py` and do
+  a full relaunch (Cmd-Q). After that first registration, new companies need no
+  restart; verify with the `health_check` or `list_companies` tool.
+- **First-registration restart skipped.** A newly added connector entry loads
+  only on a full relaunch. Closing the window isn't enough.
+- **Legacy setup, wrong slug.** In old per-company setups, the `env.QBO_COMPANY`
+  in the config must match the `tokens.<slug>.json` filename exactly.
+  `list_companies.py` shows legacy connectors in their own column.
 
-## "Refresh token expired (100+ days)"
+## "Refresh token expired"
 
-Intuit refresh tokens expire after ~100 days of disuse. Re-authorize that one
-company: `QBO_COMPANY=<slug> npm run connect`. No config change or restart needed
-if the connector already exists — the token file is refreshed in place.
+Intuit refresh tokens expire after roughly 100 days of disuse (and carry a
+5-year maximum validity). Re-authorize that one company:
+`QBO_COMPANY=<slug> npm run connect`. No config change or restart needed; the
+token file is refreshed in place.
+
+## Offboarding a client
+
+Deleting the token file alone leaves the OAuth grant live on Intuit's side. Use
+`npm run disconnect -- <slug>`, which revokes the grant first and then removes
+the file.
 
 ## Wrong company's data appearing
 

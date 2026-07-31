@@ -66,6 +66,9 @@ import {
 } from "./lines.js";
 import { compactList } from "./compact.js";
 import { parseCSV, planImport, importId, rowMarker, postedRows, recordPosted } from "./csv.js";
+import { flattenReport, consolidateReports, glFlatten, flagGlRows } from "./reports.js";
+import { matchTransactions, findDuplicateGroups } from "./reconcile.js";
+import { checkWritePolicy } from "./policy.js";
 
 const log = (...a) => console.error("[qbo-mcp]", ...a);
 
@@ -223,13 +226,20 @@ async function resolveCompany(explicit, { write = false } = {}) {
         `No such company "${explicit}". Available: ${formatCompanyList(companies)}.`
       );
     }
+    if (write) await checkWritePolicy(slug, null); // fail fast on read-only companies
     return slug;
   }
   // 2. Session default (set via select_company).
-  if (sessionDefault) return sessionDefault;
+  if (sessionDefault) {
+    if (write) await checkWritePolicy(sessionDefault, null);
+    return sessionDefault;
+  }
   // 3. Env default (legacy per-connector QBO_COMPANY).
   const envDefault = envDefaultCompany();
-  if (envDefault) return envDefault;
+  if (envDefault) {
+    if (write) await checkWritePolicy(envDefault, null);
+    return envDefault;
+  }
   // 4. Convenience fallbacks.
   const companies = await listCompanies();
   if (companies.length === 0) return ""; // pure legacy single-file / default connector
@@ -1723,6 +1733,250 @@ server.tool(
   })
 );
 
+/* ===================== FLEET (MULTI-COMPANY) TOOLS (3) ==================== */
+
+// Run one report across several companies and merge the rows side by side.
+async function consolidatedReport(reportName, targetCompanies, params) {
+  const known = await listCompanies();
+  const slugs = targetCompanies?.length
+    ? targetCompanies.map((s) => sanitizeSlug(s))
+    : known.map((k) => k.slug);
+  if (!slugs.length) throw new Error("No companies connected.");
+  const byCompany = [];
+  const errors = [];
+  for (const slug of slugs) {
+    if (!known.some((k) => k.slug === slug)) {
+      errors.push({ company: slug, error: "not connected (see list_companies)" });
+      continue;
+    }
+    try {
+      const rep = await qboRequest(`/reports/${reportName}${reportQuery(params)}`, { company: slug });
+      byCompany.push({ company: slug, flat: flattenReport(rep) });
+    } catch (e) {
+      errors.push({ company: slug, error: e.message });
+    }
+  }
+  if (!byCompany.length) {
+    throw new Error(`No reports could be fetched. ${errors.map((e) => `${e.company}: ${e.error}`).join("; ")}`);
+  }
+  const consolidated = consolidateReports(byCompany);
+  return errors.length ? { ...consolidated, errors } : consolidated;
+}
+
+server.tool(
+  "get_consolidated_profit_and_loss",
+  "Profit & Loss across several companies at once: one table, a column per company, plus a combined total. Rows are merged by account name; summary rows (Total Income, Net Income) are included with is_summary: true.",
+  {
+    start_date: z.string().describe("YYYY-MM-DD"),
+    end_date: z.string().describe("YYYY-MM-DD"),
+    accounting_method: accountingMethodArg,
+    companies: z.array(z.string()).optional().describe("Company slugs to include (default: every connected company)"),
+  },
+  tool(async ({ start_date, end_date, accounting_method, companies }) => {
+    return asText(await consolidatedReport("ProfitAndLoss", companies, { start_date, end_date, accounting_method }));
+  })
+);
+
+server.tool(
+  "get_consolidated_balance_sheet",
+  "Balance Sheet across several companies at once: one table, a column per company, plus a combined total.",
+  {
+    start_date: z.string().optional().describe("YYYY-MM-DD"),
+    end_date: z.string().describe("YYYY-MM-DD (the as-of date)"),
+    accounting_method: accountingMethodArg,
+    companies: z.array(z.string()).optional().describe("Company slugs to include (default: every connected company)"),
+  },
+  tool(async ({ start_date, end_date, accounting_method, companies }) => {
+    return asText(await consolidatedReport("BalanceSheet", companies, { start_date, end_date, accounting_method }));
+  })
+);
+
+server.tool(
+  "create_journal_entry_multi",
+  "Post the same journal entry to several companies in one call (e.g. a monthly management fee across client files). Companies must be listed explicitly; account/entity names are resolved per company. Returns a per-company result, so one failure never blocks the rest.",
+  {
+    companies: z.array(z.string()).min(1).describe("Explicit company slugs to post to (never inferred)"),
+    lines: z.array(journalLineSchema).describe("At least two lines; debits must equal credits"),
+    txn_date: z.string().optional().describe("YYYY-MM-DD (defaults to today)"),
+    doc_number: z.string().optional(),
+    memo: z.string().optional(),
+    adjustment: z.boolean().optional(),
+  },
+  tool(async ({ companies: targets, lines, txn_date, doc_number, memo, adjustment }) => {
+    const known = await listCompanies();
+    const results = [];
+    for (const raw of targets) {
+      const slug = sanitizeSlug(raw);
+      const entry = { company: slug };
+      try {
+        if (!known.some((k) => k.slug === slug)) {
+          throw new Error(`No such company "${raw}". Available: ${formatCompanyList(known)}.`);
+        }
+        await checkWritePolicy(slug, null);
+        const warnings = await closedPeriodWarnings(slug, [txn_date]);
+        const payload = { Line: await buildJournalLines(lines, slug) };
+        if (txn_date) payload.TxnDate = txn_date;
+        if (doc_number) payload.DocNumber = doc_number;
+        if (memo) payload.PrivateNote = memo;
+        if (adjustment != null) payload.Adjustment = adjustment;
+        const r = await qboRequest(`/journalentry`, { method: "POST", body: payload, company: slug });
+        entry.status = "ok";
+        entry.journal_entry_id = r.JournalEntry?.Id;
+        entry.doc_number = r.JournalEntry?.DocNumber;
+        if (warnings.length) entry.warnings = warnings;
+      } catch (e) {
+        entry.status = "error";
+        entry.error = e.message;
+      }
+      results.push(entry);
+    }
+    const failed = results.filter((r) => r.status !== "ok").length;
+    return asText({ posted: results.length - failed, failed, results });
+  })
+);
+
+/* ===================== RECONCILIATION & REVIEW (3) ======================== */
+
+server.tool(
+  "reconcile_bank_csv",
+  "Compare a bank-statement CSV against the QBO register for that bank account: what matches, what is on the statement but not in the books, and what is in the books but not on the statement. Matches on exact amount within a date tolerance. Read-only.",
+  {
+    file_path: z.string(),
+    bank_account_name: z.string(),
+    start_date: z.string().optional().describe("YYYY-MM-DD (default: earliest statement date)"),
+    end_date: z.string().optional().describe("YYYY-MM-DD (default: latest statement date)"),
+    date_tolerance_days: z.number().int().min(0).max(14).optional().describe("Default 2"),
+    amount_convention: z.enum(["negative_out", "positive_out"]).optional(),
+    company: companyArg,
+  },
+  tool(async ({ file_path, bank_account_name, start_date, end_date, date_tolerance_days, amount_convention, company }) => {
+    const c = await resolveCompany(company);
+    const fileBytes = await readFile(expandHome(file_path));
+    const plan = planImport(parseCSV(fileBytes.toString("utf8")), { amountConvention: amount_convention });
+    if (plan.errors.length) {
+      return asText({
+        error_rows: plan.errors,
+        note: "Fix or accept these unreadable rows first; they are excluded from the comparison below.",
+      });
+    }
+    const bank = await findAccountByName(bank_account_name, c);
+    if (!bank) throw notFoundError("Account", bank_account_name, await suggestNames("Account", bank_account_name, c, "Name"));
+
+    const allDates = [...plan.outflows, ...plan.inflows].map((r) => r.date).sort();
+    const from = start_date || allDates[0];
+    const to = end_date || allDates[allDates.length - 1];
+    if (!from || !to) throw new Error("The CSV has no readable rows to reconcile.");
+
+    const purchases = await qboQueryAll(
+      `SELECT * FROM Purchase WHERE AccountRef = '${bank.Id}' AND TxnDate >= '${esc(from)}' AND TxnDate <= '${esc(to)}'`,
+      "Purchase", { company: c }
+    );
+    const deposits = await qboQueryAll(
+      `SELECT * FROM Deposit WHERE DepositToAccountRef = '${bank.Id}' AND TxnDate >= '${esc(from)}' AND TxnDate <= '${esc(to)}'`,
+      "Deposit", { company: c }
+    );
+    const registerOut = purchases.rows.map((p) => ({
+      id: p.Id, type: "Purchase", date: p.TxnDate, amount: Number(p.TotalAmt || 0),
+      payee: p.EntityRef?.name ?? null, memo: p.PrivateNote ?? null,
+    }));
+    const registerIn = deposits.rows.map((d) => ({
+      id: d.Id, type: "Deposit", date: d.TxnDate, amount: Number(d.TotalAmt || 0), memo: d.PrivateNote ?? null,
+    }));
+
+    const tolerance = { toleranceDays: date_tolerance_days ?? 2 };
+    const outflows = matchTransactions(plan.outflows, registerOut, tolerance);
+    const inflows = matchTransactions(plan.inflows, registerIn, tolerance);
+
+    return asText({
+      company: c || "(default)",
+      bank_account: bank.Name,
+      period: { from, to },
+      outflows: {
+        matched: outflows.matched.length,
+        on_statement_not_in_books: outflows.statement_only,
+        in_books_not_on_statement: outflows.register_only,
+      },
+      inflows: {
+        matched: inflows.matched.length,
+        on_statement_not_in_books: inflows.statement_only,
+        in_books_not_on_statement: inflows.register_only,
+      },
+      truncated: purchases.truncated || deposits.truncated || undefined,
+      note: "Register scan covers Purchases and Deposits on this account. Transfers and bill payments are not scanned and can explain leftovers. Statement-only outflows can be imported with import_transactions_from_csv.",
+    });
+  })
+);
+
+server.tool(
+  "find_duplicate_transactions",
+  "Scan for likely duplicate transactions: same party and exact amount, dated within a few days of each other. Returns candidate groups for human review; nothing is changed.",
+  {
+    entity: z.enum(["Purchase", "Bill", "Invoice"]),
+    start_date: z.string().optional().describe("YYYY-MM-DD"),
+    end_date: z.string().optional().describe("YYYY-MM-DD"),
+    date_window_days: z.number().int().min(0).max(31).optional().describe("Default 3"),
+    company: companyArg,
+  },
+  tool(async ({ entity, start_date, end_date, date_window_days, company }) => {
+    const c = await resolveCompany(company);
+    const where = [];
+    if (start_date) where.push(`TxnDate >= '${esc(start_date)}'`);
+    if (end_date) where.push(`TxnDate <= '${esc(end_date)}'`);
+    const sql = `SELECT * FROM ${entity}${where.length ? " WHERE " + where.join(" AND ") : ""}`;
+    const { rows, truncated } = await qboQueryAll(sql, entity, { company: c });
+    const party = (r) =>
+      entity === "Invoice" ? r.CustomerRef?.name ?? r.CustomerRef?.value
+      : entity === "Bill" ? r.VendorRef?.name ?? r.VendorRef?.value
+      : r.EntityRef?.name ?? r.AccountRef?.name ?? null;
+    const mapped = rows.map((r) => ({
+      id: r.Id, doc_number: r.DocNumber ?? null, party: party(r),
+      amount: Number(r.TotalAmt || 0), date: r.TxnDate,
+    }));
+    const groups = findDuplicateGroups(mapped, { dateWindowDays: date_window_days ?? 3 });
+    return asText({
+      entity,
+      scanned: mapped.length,
+      truncated,
+      duplicate_groups: groups.length,
+      candidates: groups,
+      note: "Same party, same amount, close dates. Review before deleting anything; legitimate repeats (rent, subscriptions) look identical.",
+    });
+  })
+);
+
+server.tool(
+  "get_general_ledger_flat",
+  "General Ledger as flat transaction rows (account, date, type, num, name, memo, split, amount) instead of QBO's nested report tree. Optional review flags mark weekend postings, large or round amounts, and journal entries. Built for review and analysis passes.",
+  {
+    start_date: z.string().optional().describe("YYYY-MM-DD"),
+    end_date: z.string().optional().describe("YYYY-MM-DD"),
+    date_macro: dateMacroArg,
+    accounting_method: accountingMethodArg,
+    flags: z.boolean().optional().describe("Attach review-heuristic flags (default true)"),
+    company: companyArg,
+  },
+  tool(async ({ start_date, end_date, date_macro, accounting_method, flags, company }) => {
+    const c = await resolveCompany(company);
+    const q = reportQuery({
+      start_date, end_date, date_macro, accounting_method,
+      columns: "tx_date,txn_type,doc_num,name,memo,split_acc,subt_nat_amount",
+    });
+    const rep = await qboRequest(`/reports/GeneralLedger${q}`, { company: c });
+    let rows = glFlatten(flattenReport(rep));
+    if (flags !== false) rows = flagGlRows(rows);
+    return asText({
+      count: rows.length,
+      rows,
+      ...(flags !== false ? { flag_meanings: {
+        weekend: "posted on a Saturday or Sunday",
+        round_amount: "1,000 or more in even hundreds",
+        large: "absolute amount of 10,000 or more",
+        journal_entry: "posted via journal entry",
+      } } : {}),
+    });
+  })
+);
+
 /* =========================== ATTACHMENTS & ADVANCED =========================== */
 
 server.tool(
@@ -1814,6 +2068,33 @@ server.tool(
       throw new Error("Path traversal sequences are not allowed in `path`; it must stay under /v3/company/{realmId}.");
     }
     return asText(await qboRequest(p, { method: method || "GET", body, company: c }));
+  })
+);
+
+// Path validation shared with api_request, GET-only. Split out so permission
+// settings can distinguish them: api_get is safe to always-allow, while
+// api_request (which can write) should stay behind approval.
+server.tool(
+  "api_get",
+  "Read-only escape hatch: GET any QBO endpoint under /v3/company/{realmId} (reports, queries, single records). Never writes; safe to always-allow. Use api_request when a POST is required.",
+  {
+    path: z.string().describe("Path after /v3/company/{realmId}, starting with '/'"),
+    company: companyArg,
+  },
+  tool(async ({ path: reqPath, company }) => {
+    const c = await resolveCompany(company);
+    const p = reqPath.startsWith("/") ? reqPath : `/${reqPath}`;
+    if (/[\r\n\t]/.test(p)) throw new Error("Control characters are not allowed in `path`.");
+    let decodedPath;
+    try {
+      decodedPath = decodeURIComponent(p.split("?")[0]);
+    } catch {
+      throw new Error("Invalid percent-encoding in `path`.");
+    }
+    if (decodedPath.includes("..") || decodedPath.includes("\\")) {
+      throw new Error("Path traversal sequences are not allowed in `path`; it must stay under /v3/company/{realmId}.");
+    }
+    return asText(await qboRequest(p, { company: c }));
   })
 );
 
