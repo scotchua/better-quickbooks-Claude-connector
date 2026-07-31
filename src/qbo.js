@@ -10,15 +10,18 @@
 import http from "node:http";
 import { exec } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { readFile, writeFile, readdir, rename } from "node:fs/promises";
+import { readFile, writeFile, readdir, rename, unlink } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { encryptionEnabled, encryptTokens, decryptTokens, isEncrypted } from "./secure-store.js";
+import { record as auditRecord, summarizeResponse } from "./audit.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
 
 const AUTHORIZE_URL = "https://appcenter.intuit.com/connect/oauth2";
 const TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer";
+const REVOKE_URL = "https://developer.api.intuit.com/v2/oauth2/tokens/revoke";
 const SCOPE = "com.intuit.quickbooks.accounting";
 // Intuit sunset minor versions 1-74 on 2025-08-01; 75 is the supported baseline.
 const MINOR_VERSION = process.env.QBO_MINOR_VERSION || "75";
@@ -121,20 +124,38 @@ function basicAuthHeader({ clientId, clientSecret }) {
 }
 
 async function loadTokens(slug) {
+  let parsed;
   try {
-    const raw = await readFile(tokensPathFor(slug), "utf8");
-    return JSON.parse(raw);
+    parsed = JSON.parse(await readFile(tokensPathFor(slug), "utf8"));
   } catch {
+    return null;
+  }
+  try {
+    if (isEncrypted(parsed)) return await decryptTokens(parsed);
+    // Legacy plaintext file: migrate to encrypted-at-rest on first touch.
+    if (encryptionEnabled() && parsed?.access_token) {
+      try {
+        await saveTokens(slug, parsed);
+      } catch (e) {
+        log("Could not migrate token file to encrypted storage:", e.message);
+      }
+    }
+    return parsed;
+  } catch (e) {
+    log(`Could not decrypt ${tokensPathFor(slug)}: ${e.message}`);
     return null;
   }
 }
 
 async function saveTokens(slug, tokens) {
   const p = tokensPathFor(slug);
-  // Owner-only permissions, written atomically: a temp file with 0600 perms is
-  // renamed over the target so concurrent readers never see a torn file.
+  // Credentials are encrypted at rest (realmId/environment stay plaintext for
+  // company discovery). Owner-only permissions, written atomically: a temp
+  // file with 0600 perms is renamed over the target so concurrent readers
+  // never see a torn file.
+  const payload = encryptionEnabled() ? await encryptTokens(tokens) : tokens;
   const tmp = `${p}.${process.pid}.tmp`;
-  await writeFile(tmp, JSON.stringify(tokens, null, 2), { encoding: "utf8", mode: 0o600 });
+  await writeFile(tmp, JSON.stringify(payload, null, 2), { encoding: "utf8", mode: 0o600 });
   await rename(tmp, p);
   log("Tokens saved to", p);
 }
@@ -417,12 +438,33 @@ async function qboRequest(pathAndQuery, { method = "GET", body, company } = {}) 
   let data;
   try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
 
+  // intuit_tid is Intuit's per-request trace id; it goes into errors and the
+  // audit log because Intuit support asks for it.
+  const tid = res.headers.get("intuit_tid") || undefined;
+  const fault = data?.Fault?.Error?.[0];
+  const detail = fault
+    ? `${fault.Message}${fault.Detail ? ": " + fault.Detail : ""}`
+    : text;
+
+  if (method !== "GET") {
+    await auditRecord({
+      kind: "api_write",
+      method,
+      path: pathAndQuery.split("?")[0],
+      company: sanitizeSlug(company ?? DEFAULT_COMPANY) || "(default)",
+      realmId: tokens.realmId,
+      environment: tokens.environment,
+      status: res.status,
+      ok: res.ok,
+      intuit_tid: tid,
+      ...(res.ok ? summarizeResponse(data) : { error: String(detail).slice(0, 500) }),
+    });
+  }
+
   if (!res.ok) {
-    const fault = data?.Fault?.Error?.[0];
-    const detail = fault
-      ? `${fault.Message}${fault.Detail ? " — " + fault.Detail : ""}`
-      : text;
-    throw new Error(`QBO API ${res.status} on ${method} ${pathAndQuery}: ${detail}`);
+    throw new Error(
+      `QBO API ${res.status} on ${method} ${pathAndQuery}: ${detail}${tid ? ` (intuit_tid: ${tid})` : ""}`
+    );
   }
   return data;
 }
@@ -447,9 +489,22 @@ async function qboUpload(formData, { company } = {}) {
   const text = await res.text();
   let data;
   try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+  const tid = res.headers.get("intuit_tid") || undefined;
+  await auditRecord({
+    kind: "api_write",
+    method: "POST",
+    path: "/upload",
+    company: sanitizeSlug(company ?? DEFAULT_COMPANY) || "(default)",
+    realmId: tokens.realmId,
+    environment: tokens.environment,
+    status: res.status,
+    ok: res.ok,
+    intuit_tid: tid,
+  });
   if (!res.ok) {
     const fault = data?.Fault?.Error?.[0];
-    throw new Error(`QBO upload ${res.status}: ${fault ? `${fault.Message}${fault.Detail ? " — " + fault.Detail : ""}` : text}`);
+    const detail = fault ? `${fault.Message}${fault.Detail ? ": " + fault.Detail : ""}` : text;
+    throw new Error(`QBO upload ${res.status}: ${detail}${tid ? ` (intuit_tid: ${tid})` : ""}`);
   }
   return data;
 }
@@ -457,6 +512,35 @@ async function qboUpload(formData, { company } = {}) {
 async function getRealmId(company) {
   const tokens = await getValidTokens(company ?? DEFAULT_COMPANY);
   return tokens.realmId;
+}
+
+// Revoke a company's OAuth grant with Intuit and delete its token file. This
+// is the offboarding step: deleting the file alone would leave the grant live
+// on Intuit's side until it expires on its own.
+async function disconnectCompany(slug) {
+  const label = sanitizeSlug(slug) || "the default company";
+  const tokens = await loadTokens(slug);
+  if (!tokens?.refresh_token) {
+    throw new Error(`No stored tokens for ${label}; nothing to disconnect.`);
+  }
+  const creds = credentials();
+  const res = await qboFetch(REVOKE_URL, {
+    method: "POST",
+    headers: {
+      Authorization: basicAuthHeader(creds),
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({ token: tokens.refresh_token }),
+  }, { idempotent: true });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Token revocation failed for ${label} (HTTP ${res.status}): ${text}`);
+  }
+  await unlink(tokensPathFor(slug));
+  await auditRecord({ kind: "disconnect", company: sanitizeSlug(slug) || "(default)", realmId: tokens.realmId ?? null });
+  log(`Revoked Intuit access and removed the token file for ${label}.`);
+  return { slug: sanitizeSlug(slug), realmId: tokens.realmId ?? null };
 }
 
 // Derive a short, stable, filesystem-safe slug from a realmId: the last 4 digits,
@@ -590,6 +674,7 @@ export {
   getRealmId,
   runAuthorizationFlow,
   runBatchAuthorization,
+  disconnectCompany,
   deriveSlugFromRealm,
   listCompanies,
   sanitizeSlug,

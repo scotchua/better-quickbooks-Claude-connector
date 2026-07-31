@@ -3,6 +3,10 @@ node_modules/
 # Secrets — never commit
 .env
 tokens*.json
+.qbo-key*
+
+# Local records (write audit log, CSV import journal)
+audit-log/
 
 # Generated output / scratch
 save-excels-here/
