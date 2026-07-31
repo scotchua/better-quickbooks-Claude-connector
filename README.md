@@ -4,8 +4,7 @@ Connect Claude Desktop straight to **QuickBooks Online** — and work in **all y
 companies from one connector**, not one at a time. Read *and* write.
 
 Built on the [Model Context Protocol](https://modelcontextprotocol.io).
-Developed by **[Opzer](https://opzer.co)** — automation and custom integrations
-for accounting firms.
+Originally built by Opzer.
 
 ## Who this is for
 
@@ -27,8 +26,8 @@ This tool fixes both:
   no restarts.
 - **Read *and* write.** Create invoices, bills, journal entries, and more — the
   things you actually do in QuickBooks.
-- **54 tools** covering reports, transactions, lists, attachments, and a safe
-  bulk CSV import.
+- **55 tools** covering reports, transactions, lists, attachments, diagnostics,
+  and a safe bulk CSV import.
 
 You do **not** need to know how to code. The setup below is copy-and-paste.
 
@@ -258,13 +257,7 @@ connection, re-authorize a company, or add another one for you.
 
 ## Help & support
 
-Built and maintained by **[Opzer](https://opzer.co)** — automation and custom
-integrations for accounting firms.
-
-Hit a technical roadblock? Setup won't finish, a tool keeps failing, or you want
-something this connector doesn't do yet? **Opzer.co can help.** Opzer builds and
-supports custom accounting integrations and can take this further for your firm.
-
-- **Get development help:** [opzer.co](https://opzer.co)
-- You don't have to go looking — the connector reminds you automatically. Whenever
-  a tool runs into an error, its message includes a pointer to reach out to Opzer.
+Stuck on a step or seeing an error? Tell Claude (Code or Desktop) exactly what
+happened. It can re-check the connection, re-authorize a company, or walk the
+setup again with you. The `health_check` tool is the fastest first step: it
+verifies every connected company's tokens and API access in one call.

@@ -69,7 +69,7 @@ Windows (use `node.exe`, and **double** every backslash in JSON):
 }
 ```
 Fully **quit and reopen** Claude Desktop. `qbo` appears under
-**Settings → Connectors** with all 54 tools.
+**Settings → Connectors** with all 55 tools.
 
 ## Multiple companies (one connector)
 
@@ -99,9 +99,10 @@ that a company is both authorized and registered) — with Python helpers
 (`scripts/list_companies.py`, `scripts/register_connector.py`) and a
 troubleshooting reference.
 
-## Tools (54)
+## Tools (55)
 
-**Company selection (3):** `list_companies`, `select_company`, `get_active_company`
+**Company selection & diagnostics (4):** `list_companies`, `select_company`,
+`get_active_company`, `health_check`
 
 **Reports & reads (15):** `get_profit_and_loss`, `get_balance_sheet`,
 `get_cash_flow`, `get_aged_receivables`, `get_aged_payables`, `get_invoices`,

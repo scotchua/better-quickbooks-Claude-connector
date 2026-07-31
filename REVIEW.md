@@ -4,7 +4,7 @@
 **Scope:** Full source (`src/index.js`, `src/qbo.js`), docs, bundled `add-qbo-company` skill, dependency tree.
 **Standard applied:** Production use by accounting firms handling sensitive financial data across many client companies.
 
-No code was changed. This document is the deliverable: findings, ratings, and a prioritized roadmap. File references use `file:line` against commit `11f9504`.
+The review itself changed no code; findings reference the codebase at commit `11f9504` using `file:line`, so cited lines describe the pre-fix state.
 
 **Update 2026-07-31:** the maintainer answered the five open questions. Decisions are recorded in section 15 and the affected recommendations below were updated to match (token storage, vendor marketing, deployment model, persistence).
 
@@ -51,6 +51,8 @@ No code was changed. This document is the deliverable: findings, ratings, and a 
 ## 2. Prioritized Improvement Roadmap
 
 ### Quick Wins (low effort, high impact; est. 1-3 days each)
+
+**Status (2026-07-31): implemented on this branch after maintainer approval**, with two exceptions that stay open: the CI job (belongs with the medium-term test suite) and the Windows port of the registrar script (superseded by the unified-model docs rewrite).
 
 - Update `MINOR_VERSION` to `75` and make it env-overridable (`src/qbo.js:23`). Versions 1-74 are sunset (Intuit, Aug 2025; see Sources).
 - Bind both OAuth callback listeners to `127.0.0.1` instead of all interfaces (`src/qbo.js:236`, `src/qbo.js:469`).
