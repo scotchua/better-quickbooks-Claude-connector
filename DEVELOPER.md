@@ -69,7 +69,7 @@ Windows (use `node.exe`, and **double** every backslash in JSON):
 }
 ```
 Fully **quit and reopen** Claude Desktop. `qbo` appears under
-**Settings → Connectors** with all 66 tools.
+**Settings → Connectors** with all 95 tools.
 
 ## Multiple companies (one connector)
 
@@ -100,10 +100,13 @@ troubleshooting reference. After the first setup, adding a company needs no
 restart. Legacy per-company `qbo-<slug>` connectors still work; the scripts
 report them and support migration to the unified entry.
 
-## Tools (90)
+## Tools (95)
 
 **Company selection & diagnostics (4):** `list_companies`, `select_company`,
 `get_active_company`, `health_check`
+
+**Interactive setup, no terminal (5):** `connect_company`, `check_connection`,
+`cancel_connection`, `set_company_policy`, `get_company_policy`
 
 **Fleet / multi-company (3):** `get_consolidated_profit_and_loss`,
 `get_consolidated_balance_sheet`, `create_journal_entry_multi`

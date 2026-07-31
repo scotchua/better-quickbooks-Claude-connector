@@ -38,6 +38,9 @@ import {
   runAuthorizationFlow,
   runBatchAuthorization,
   disconnectCompany,
+  beginAuthorization,
+  authorizationStatus,
+  cancelAuthorization,
   deriveSlugFromRealm,
   listCompanies,
   sanitizeSlug,
@@ -77,7 +80,7 @@ import { compactList } from "./compact.js";
 import { parseCSV, planImport, importId, rowMarker, postedRows, recordPosted } from "./csv.js";
 import { flattenReport, consolidateReports, glFlatten, flagGlRows } from "./reports.js";
 import { matchTransactions, findDuplicateGroups } from "./reconcile.js";
-import { checkWritePolicy } from "./policy.js";
+import { checkWritePolicy, policyFor, setCompanyPolicy, policyPath } from "./policy.js";
 
 const log = (...a) => console.error("[qbo-mcp]", ...a);
 
@@ -387,6 +390,138 @@ registerTool(
     const failing = results.filter((r) => r.status !== "ok").length;
     return asText({ checked: results.length, healthy: results.length - failing, failing, results });
   })
+);
+
+/* ==================== INTERACTIVE AUTHORIZATION (3) ==================== */
+// Connecting a company without a terminal. connect_company hands back a link,
+// the human clicks Allow, then check_connection confirms which file landed.
+
+registerTool(
+  "connect_company",
+  "Start connecting a NEW QuickBooks company from this conversation, no terminal needed. Returns an Intuit authorization link for the user to click; it does not wait for them. After they click Allow, call check_connection to confirm. Give each company a short slug (letters, numbers, hyphens) that stays with it.",
+  {
+    company: z.string().describe("Short slug for this company, e.g. acme or mhpe. Becomes tokens.<slug>.json"),
+    environment: z.enum(["sandbox", "production"]).describe("production for real client books, sandbox for Intuit test files"),
+    open_browser: z.boolean().optional().describe("Also try to open the link locally (default true)"),
+  },
+  tool(async ({ company, environment, open_browser }) => {
+    const slug = sanitizeSlug(company);
+    if (!slug) throw new Error("company must contain at least one letter, number, or hyphen.");
+    const existing = (await listCompanies()).find((c) => c.slug === slug);
+    const r = await beginAuthorization({ company: slug, environment, openBrowserWindow: open_browser !== false });
+    return asText({
+      ...r,
+      already_connected: existing
+        ? { realmId: existing.realmId, environment: existing.environment, note: "Completing this will replace that authorization." }
+        : undefined,
+      next_step: "Give the user the authorize_url to click, have them log in and pick the right company, then call check_connection.",
+      reminder: environment === "production"
+        ? "Production: these are real books. Confirm the company name with check_connection before anything is posted."
+        : undefined,
+    });
+  })
+);
+
+registerTool(
+  "check_connection",
+  "Check whether an in-progress connect_company authorization finished, and confirm which QuickBooks company actually landed. Call this after the user clicks Allow. Safe to call repeatedly.",
+  {},
+  tool(async () => {
+    const status = authorizationStatus();
+    if (status.state !== "connected") {
+      const guidance = {
+        idle: "No authorization in progress. Start one with connect_company.",
+        waiting: "Still waiting on the browser. Ask the user to finish at the authorize_url, then check again.",
+        failed: "Authorization failed. Read the error, fix the cause, then call connect_company again.",
+        expired: "The authorization window closed before the callback arrived. Call connect_company again.",
+      }[status.state];
+      return asText({ ...status, guidance });
+    }
+    // Connected: name the file so a wrong-company authorization cannot pass silently.
+    let company_name = null, legal_name = null, address_state = null, warning;
+    try {
+      const info = await qboRequest(`/companyinfo/${status.realmId}`, { company: status.slug });
+      company_name = info.CompanyInfo?.CompanyName ?? null;
+      legal_name = info.CompanyInfo?.LegalName ?? null;
+      address_state = info.CompanyInfo?.CompanyAddr?.CountrySubDivisionCode ?? null;
+    } catch (e) {
+      warning = `Connected, but reading company info failed: ${e.message}`;
+    }
+    const twins = (await listCompanies()).filter((c) => c.realmId === status.realmId && c.slug !== status.slug);
+    return asText({
+      ...status,
+      company_name,
+      legal_name,
+      address_state,
+      warning,
+      duplicate_slugs: twins.length ? twins.map((c) => c.slug) : undefined,
+      verify: "Confirm company_name is the client you intended. If it is not, connect_company again and pick the right file.",
+    });
+  })
+);
+
+// Guardrail tools. Deliberately not named with a write prefix, so locking a
+// company down stays available even when QBO_DISABLE_WRITES has suppressed
+// every posting tool.
+registerTool(
+  "set_company_policy",
+  "Set the write guardrail for one company: make it read-only, cap the size of a single write, or refuse writes dated before a floor. Takes effect immediately with no restart, and leaves other companies' rules alone. Use read_only when onboarding, during a diagnostic engagement, or any time a client's books should not be posted to.",
+  {
+    company: z.string().describe("Company slug the rule applies to"),
+    read_only: z.boolean().optional().describe("true refuses all writes; false lifts it"),
+    max_write_amount: z.number().min(0).optional().describe("Refuse writes above this total; 0 removes the cap"),
+    min_txn_date: z.string().optional().describe("YYYY-MM-DD floor for transaction dates; \"clear\" removes it"),
+  },
+  tool(async ({ company, read_only, max_write_amount, min_txn_date }) => {
+    const slug = sanitizeSlug(company);
+    if (!slug) throw new Error("company must contain at least one letter, number, or hyphen.");
+    const known = await listCompanies();
+    if (known.length && !known.some((c) => c.slug === slug)) {
+      throw new Error(`No such company "${company}". Available: ${formatCompanyList(known)}.`);
+    }
+    if (read_only === undefined && max_write_amount === undefined && min_txn_date === undefined) {
+      throw new Error("Nothing to change. Pass read_only, max_write_amount, or min_txn_date.");
+    }
+    const r = await setCompanyPolicy(slug, {
+      read_only,
+      max_write_amount,
+      min_txn_date: min_txn_date === "clear" ? null : min_txn_date,
+    });
+    return asText({
+      ...r,
+      effective: "Immediately. The connector re-reads this file on every write.",
+      note: Object.keys(r.rules).length === 0 ? "No restrictions remain for this company." : undefined,
+    });
+  })
+);
+
+registerTool(
+  "get_company_policy",
+  "Show the write guardrails currently in force, for one company or all of them. Worth checking before posting anything to a client's books, and when a write is refused and the reason is unclear.",
+  { company: companyArg },
+  tool(async ({ company }) => {
+    if (company) {
+      const slug = sanitizeSlug(company);
+      return asText({ company: slug, rules: await policyFor(slug), policy_file: policyPath() });
+    }
+    const companies = await listCompanies();
+    const rows = [];
+    for (const c of companies) rows.push({ company: c.slug, rules: await policyFor(c.slug) });
+    const restricted = rows.filter((r) => Object.keys(r.rules).length);
+    return asText({
+      policy_file: policyPath(),
+      restricted_companies: restricted.length,
+      companies: rows,
+      note: restricted.length ? undefined : "No guardrails in force; every connected company is writable.",
+    });
+  })
+);
+
+registerTool(
+  "cancel_connection",
+  "Abandon an in-progress company authorization and release the callback port. Use when the user gives up, picked the wrong company, or wants to restart with different keys.",
+  {},
+  tool(async () => asText(cancelAuthorization()))
 );
 
 /* =========================== READ TOOLS (9) =========================== */

@@ -26,10 +26,11 @@ This tool fixes both:
   no restarts.
 - **Read *and* write.** Create invoices, bills, journal entries, and more — the
   things you actually do in QuickBooks.
-- **90 tools** covering reports, transactions, searches with typed filters,
+- **95 tools** covering reports, transactions, searches with typed filters,
   bill payments, invoice and estimate PDFs, attachments, change tracking,
   reconciliation, multi-company consolidation, diagnostics, and a safe bulk
-  CSV import.
+  CSV import. Connecting a new client happens in the chat: Claude hands you an
+  Intuit link, you click Allow, and it confirms which company landed.
 
 You do **not** need to know how to code. The setup below is copy-and-paste.
 

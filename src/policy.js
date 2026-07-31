@@ -13,7 +13,7 @@
 //   max_write_amount number: refuse writes whose money total exceeds this
 //   min_txn_date     "YYYY-MM-DD": refuse writes dated before this floor
 
-import { readFile, stat } from "node:fs/promises";
+import { readFile, writeFile, rename, copyFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -87,6 +87,58 @@ export function txnDates(body) {
     }
   }
   return dates;
+}
+
+// Merge one company's rules into the policy file. Kept here rather than left to
+// callers because the file holds every company: a careless rewrite silently
+// opens books that were meant to stay closed. Backs up first, writes atomically,
+// and refuses to touch a file it cannot parse.
+//
+// Pass null for a rule to clear it. Returns the resulting entry.
+export async function setCompanyPolicy(slug, { read_only, max_write_amount, min_txn_date } = {}) {
+  const p = policyPath();
+  let policy = {};
+  try {
+    const raw = (await readFile(p, "utf8")).trim();
+    if (raw) policy = JSON.parse(raw);
+  } catch (e) {
+    if (e.code !== "ENOENT") {
+      throw new Error(
+        `${p} is not valid JSON (${e.message}). Fix or move it by hand; refusing to overwrite rules that may be protecting client books.`
+      );
+    }
+  }
+
+  const companies = (policy.companies ??= {});
+  const entry = (companies[slug] ??= {});
+  if (read_only === true) entry.read_only = true;
+  if (read_only === false || read_only === null) delete entry.read_only;
+  if (typeof max_write_amount === "number" && max_write_amount > 0) entry.max_write_amount = max_write_amount;
+  if (max_write_amount === null || max_write_amount === 0) delete entry.max_write_amount;
+  if (typeof min_txn_date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(min_txn_date)) entry.min_txn_date = min_txn_date;
+  else if (min_txn_date === null) delete entry.min_txn_date;
+  else if (min_txn_date !== undefined) throw new Error(`min_txn_date must be YYYY-MM-DD or null, got "${min_txn_date}".`);
+  if (Object.keys(entry).length === 0) delete companies[slug];
+
+  let backup;
+  try {
+    backup = `${p}.bak-${new Date().toISOString().replace(/[:.]/g, "").slice(0, 15)}`;
+    await copyFile(p, backup);
+  } catch {
+    backup = undefined; // no prior file to back up
+  }
+  const tmp = `${p}.${process.pid}.tmp`;
+  await writeFile(tmp, JSON.stringify(policy, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
+  await rename(tmp, p);
+  cache.path = null; // force a reload on the next check
+  cache.mtimeMs = -1;
+  return {
+    company: slug || "(default)",
+    rules: companies[slug] ?? {},
+    policy_file: p,
+    backup,
+    other_companies: Object.keys(companies).filter((s) => s !== slug),
+  };
 }
 
 // Throws when a write violates the company's policy. Pass a null body to

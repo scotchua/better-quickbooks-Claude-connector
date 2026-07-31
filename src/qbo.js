@@ -309,6 +309,123 @@ async function runAuthorizationFlow() {
   });
 }
 
+// ---- interactive authorization (no terminal) --------------------------------
+// The CLI flow above blocks until the browser callback lands, which is fine for
+// `npm run connect` but wrong for a tool call: a human clicking through Intuit
+// takes minutes and a tool must answer in seconds. So the interactive flow is
+// split in two. beginAuthorization starts a loopback listener and returns the
+// URL immediately; the listener keeps running in this long-lived MCP process
+// and parks its result here. authorizationStatus reads that result.
+//
+// One authorization at a time, because they all want the same callback port.
+let pending = null;
+
+function authorizationStatus() {
+  if (!pending) return { state: "idle" };
+  const { slug, environment, startedAt, expiresAt, result, error } = pending;
+  const base = { slug, environment, started_at: new Date(startedAt).toISOString() };
+  if (result) return { ...base, state: "connected", realmId: result.realmId };
+  if (error) return { ...base, state: "failed", error };
+  if (Date.now() > expiresAt) return { ...base, state: "expired" };
+  return { ...base, state: "waiting", seconds_remaining: Math.round((expiresAt - Date.now()) / 1000) };
+}
+
+function cancelAuthorization() {
+  if (!pending) return { state: "idle" };
+  const slug = pending.slug;
+  try { pending.server?.close(); } catch { /* already closed */ }
+  pending = null;
+  return { state: "cancelled", slug };
+}
+
+// Returns { authorize_url, slug, environment, expires_in_seconds } right away.
+// `ttlMs` bounds how long the listener stays open, so an abandoned attempt
+// cannot leave a port bound for the life of the process.
+async function beginAuthorization({ company, environment, openBrowserWindow = true, ttlMs = 10 * 60_000 } = {}) {
+  const creds = credentials(); // throws early if .env is missing keys
+  const slug = sanitizeSlug(company ?? "");
+  const env = (environment || connectEnvironment()).toLowerCase();
+  if (env !== "sandbox" && env !== "production") {
+    throw new Error(`environment must be "sandbox" or "production", got "${environment}".`);
+  }
+
+  const live = authorizationStatus();
+  if (live.state === "waiting") {
+    throw new Error(
+      `An authorization for "${live.slug || "(default)"}" is already waiting (${live.seconds_remaining}s left). ` +
+      `Finish it in the browser, or cancel it first.`
+    );
+  }
+  if (pending) cancelAuthorization(); // clear a finished or expired attempt
+
+  const state = randomBytes(16).toString("hex");
+  const redirect = new URL(creds.redirectUri);
+  const port = Number(redirect.port) || 3000;
+  const authUrl =
+    `${AUTHORIZE_URL}?client_id=${encodeURIComponent(creds.clientId)}` +
+    `&response_type=code&scope=${encodeURIComponent(SCOPE)}` +
+    `&redirect_uri=${encodeURIComponent(creds.redirectUri)}&state=${state}`;
+
+  const server = http.createServer(async (req, res) => {
+    const finish = (code, body) => { try { res.writeHead(code, { "Content-Type": "text/html" }).end(body); } catch {} };
+    try {
+      const url = new URL(req.url, `http://localhost:${port}`);
+      if (url.pathname !== redirect.pathname) return finish(404, "Not found");
+
+      const authCode = url.searchParams.get("code");
+      const realmId = url.searchParams.get("realmId");
+      if (url.searchParams.get("state") !== state) {
+        if (pending) pending.error = "OAuth state mismatch, possible CSRF. Start over.";
+        finish(400, "<h2>State mismatch</h2><p>Close this tab and start the authorization again.</p>");
+        server.close();
+        return;
+      }
+      if (!authCode || !realmId) {
+        if (pending) pending.error = "Callback arrived without a code or realmId.";
+        finish(400, "<h2>Incomplete callback</h2><p>Close this tab and start over.</p>");
+        server.close();
+        return;
+      }
+
+      const tokens = await exchangeCodeForTokens(authCode, env);
+      tokens.realmId = realmId;
+      await saveTokens(slug, tokens);
+      if (pending) pending.result = tokens;
+      finish(200,
+        `<html><body style="font-family:sans-serif;padding:3rem;text-align:center">
+           <h2>QuickBooks connected</h2>
+           <p>You can close this tab and return to Claude.</p>
+         </body></html>`);
+      server.close();
+      log(`Connected realmId ${realmId} (${env})${slug ? ` as "${slug}"` : ""} via interactive authorization.`);
+    } catch (e) {
+      if (pending) pending.error = e.message;
+      finish(500, "<h2>Authorization failed</h2><p>Return to Claude for the details.</p>");
+      server.close();
+    }
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once("error", (e) => {
+      reject(e.code === "EADDRINUSE"
+        ? new Error(`Port ${port} is busy. Another authorization or process holds it; stop that first.`)
+        : e);
+    });
+    server.listen(port, "127.0.0.1", resolve);
+  });
+
+  const startedAt = Date.now();
+  pending = { slug, environment: env, state, server, startedAt, expiresAt: startedAt + ttlMs, result: null, error: null };
+  setTimeout(() => {
+    if (pending?.startedAt === startedAt && !pending.result && !pending.error) {
+      try { pending.server?.close(); } catch { /* already closed */ }
+    }
+  }, ttlMs).unref?.();
+
+  if (openBrowserWindow) openBrowser(authUrl);
+  return { authorize_url: authUrl, slug, environment: env, expires_in_seconds: Math.round(ttlMs / 1000) };
+}
+
 async function refreshTokens(slug, existing) {
   // Intuit rotates the refresh token on every refresh, so a parallel caller or
   // another process may already have rotated it. Prefer the newest state on
@@ -704,6 +821,9 @@ export {
   runAuthorizationFlow,
   runBatchAuthorization,
   disconnectCompany,
+  beginAuthorization,
+  authorizationStatus,
+  cancelAuthorization,
   deriveSlugFromRealm,
   listCompanies,
   sanitizeSlug,

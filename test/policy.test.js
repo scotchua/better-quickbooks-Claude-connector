@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { writeAmount, txnDates, checkWritePolicy, policyFor } from "../src/policy.js";
+import { writeAmount, txnDates, checkWritePolicy, policyFor, setCompanyPolicy } from "../src/policy.js";
 
 afterEach(() => {
   delete process.env.QBO_POLICY_FILE;
@@ -69,6 +69,46 @@ describe("checkWritePolicy", () => {
     await withPolicy({ defaults: { min_txn_date: "2026-01-01" } });
     await expect(checkWritePolicy("acme", { TxnDate: "2025-12-31", TotalAmt: 1 })).rejects.toThrow(/floor/);
     await expect(checkWritePolicy("acme", { TxnDate: "2026-01-01", TotalAmt: 1 })).resolves.toBeUndefined();
+  });
+
+  it("enforces a rule the moment setCompanyPolicy writes it (no stale cache)", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "qbo-policy-write-"));
+    process.env.QBO_POLICY_FILE = path.join(dir, "qbo-policy.json");
+
+    await setCompanyPolicy("acme", { read_only: true });
+    await expect(checkWritePolicy("acme", { TotalAmt: 1 })).rejects.toThrow(/read-only/);
+
+    // Lifting it must take effect immediately, not after the cache TTL.
+    await setCompanyPolicy("acme", { read_only: false });
+    await expect(checkWritePolicy("acme", { TotalAmt: 1 })).resolves.toBeUndefined();
+  });
+
+  it("leaves other companies' rules intact when writing one", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "qbo-policy-merge-"));
+    process.env.QBO_POLICY_FILE = path.join(dir, "qbo-policy.json");
+
+    await setCompanyPolicy("locked", { read_only: true });
+    await setCompanyPolicy("capped", { max_write_amount: 5000 });
+    await setCompanyPolicy("capped", { min_txn_date: "2026-01-01" });
+
+    expect(await policyFor("locked")).toEqual({ read_only: true });
+    expect(await policyFor("capped")).toEqual({ max_write_amount: 5000, min_txn_date: "2026-01-01" });
+  });
+
+  it("drops a company entry when its last rule is cleared", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "qbo-policy-clear-"));
+    process.env.QBO_POLICY_FILE = path.join(dir, "qbo-policy.json");
+
+    await setCompanyPolicy("temp", { read_only: true });
+    const r = await setCompanyPolicy("temp", { read_only: false });
+    expect(r.rules).toEqual({});
+    expect(await policyFor("temp")).toEqual({});
+  });
+
+  it("rejects a malformed date rather than writing it", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "qbo-policy-bad-"));
+    process.env.QBO_POLICY_FILE = path.join(dir, "qbo-policy.json");
+    await expect(setCompanyPolicy("acme", { min_txn_date: "01/01/2026" })).rejects.toThrow(/YYYY-MM-DD/);
   });
 
   it("merges defaults with company overrides", async () => {
