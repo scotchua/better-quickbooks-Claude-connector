@@ -81,6 +81,7 @@ import { parseCSV, planImport, importId, rowMarker, postedRows, recordPosted } f
 import { flattenReport, consolidateReports, glFlatten, flagGlRows } from "./reports.js";
 import { matchTransactions, findDuplicateGroups } from "./reconcile.js";
 import { checkWritePolicy, policyFor, setCompanyPolicy, policyPath } from "./policy.js";
+import { roster, resolveClient, registerClient, clientsPath } from "./clients.js";
 
 const log = (...a) => console.error("[qbo-mcp]", ...a);
 
@@ -390,6 +391,64 @@ registerTool(
     const failing = results.filter((r) => r.status !== "ok").length;
     return asText({ checked: results.length, healthy: results.length - failing, failing, results });
   })
+);
+
+/* =========================== CLIENT ROSTER (3) =========================== */
+// Human names for the companies this connector can reach. Authorization stays
+// the truth for existence; these tools add the labels people actually type.
+
+registerTool(
+  "list_clients",
+  "The client roster: every company this connector can reach, with the firm's name for it, aliases, engagement type, and service lines. Also reports drift, meaning companies with no labels yet and labels with no authorization. Start here when you need to know who is set up.",
+  {},
+  tool(async () => {
+    const r = await roster();
+    return asText({
+      count: r.clients.length,
+      ...r,
+      unlabeled: r.unlabeled.length ? r.unlabeled : undefined,
+      labeled_but_not_authorized: r.labeled_but_not_authorized.length ? r.labeled_but_not_authorized : undefined,
+      hint: r.unlabeled.length
+        ? "Unlabeled companies resolve only by slug. Give them names and aliases with register_client."
+        : undefined,
+      roster_file: clientsPath(),
+    });
+  })
+);
+
+registerTool(
+  "resolve_client",
+  "Turn what someone typed (a name, nickname, abbreviation, or slug) into the right company slug. Returns candidates instead of guessing when the term is ambiguous, so a wrong client can never be assumed. Use before any per-client work when the user named a client in prose.",
+  { term: z.string().describe("What the user called the client, e.g. \"Advance\", \"PSSA\", \"the firm\"") },
+  tool(async ({ term }) => {
+    const r = await resolveClient(term);
+    if (r.match) return asText({ resolved: r.match.slug, matched_by: r.how, client: r.match });
+    return asText({
+      resolved: null,
+      matched_by: r.how,
+      candidates: r.candidates,
+      all_clients: r.all,
+      guidance: r.candidates?.length
+        ? "Ambiguous. Ask the user which of these they meant; do not pick one."
+        : "No match. Ask which client they mean, or onboard them if they are new.",
+    });
+  })
+);
+
+registerTool(
+  "register_client",
+  "Record or update the firm's labels for a company: display name, aliases people type, engagement type, service lines, and working folder. Aliases merge rather than replace, so short forms accumulate. Use during onboarding, and any time someone refers to a client by a name the connector did not recognize.",
+  {
+    company: z.string().describe("Company slug these labels belong to"),
+    name: z.string().optional().describe("The firm's name for this client"),
+    company_name: z.string().optional().describe("Legal or QuickBooks company name, when it differs"),
+    aliases: z.array(z.string()).optional().describe("Short forms people type, e.g. [\"PSSA\", \"Power Systems\"]"),
+    remove_aliases: z.array(z.string()).optional(),
+    engagement: z.string().optional().describe("e.g. monthly bookkeeping, tax only, fractional CFO, cleanup diagnostic"),
+    service_lines: z.array(z.string()).optional().describe("e.g. [\"tax\", \"CAS\"]"),
+    data_folder: z.string().optional().describe("Absolute path to this client's working folder"),
+  },
+  tool(async ({ company, ...patch }) => asText(await registerClient(company, patch)))
 );
 
 /* ==================== INTERACTIVE AUTHORIZATION (3) ==================== */

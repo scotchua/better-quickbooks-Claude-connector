@@ -17,3 +17,7 @@ save-excels-here/
 *.mjs
 .DS_Store
 __pycache__/
+
+# Client roster (local labels, includes client names)
+clients.json
+clients.json.bak

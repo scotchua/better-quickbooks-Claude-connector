@@ -26,7 +26,7 @@ This tool fixes both:
   no restarts.
 - **Read *and* write.** Create invoices, bills, journal entries, and more — the
   things you actually do in QuickBooks.
-- **95 tools** covering reports, transactions, searches with typed filters,
+- **98 tools** covering reports, transactions, searches with typed filters,
   bill payments, invoice and estimate PDFs, attachments, change tracking,
   reconciliation, multi-company consolidation, diagnostics, and a safe bulk
   CSV import. Connecting a new client happens in the chat: Claude hands you an
