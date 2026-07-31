@@ -278,6 +278,8 @@ anything that posts. Repeat for each client connector.
 Stuck on a step? Just tell Claude Code what happened — it can re-check the
 connection, re-authorize a company, or add another one for you.
 
+> **Testing:** see **[TESTING.md](TESTING.md)** for a staged verification checklist (automated, sandbox, production pilot).
+>
 > **Developers:** technical setup, the full tool list, and architecture live in
 > **[DEVELOPER.md](DEVELOPER.md)**.
 
