@@ -13,3 +13,4 @@ save-excels-here/
 *.log
 *.mjs
 .DS_Store
+__pycache__/
