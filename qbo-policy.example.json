@@ -1,0 +1,11 @@
+{
+  "defaults": {
+    "read_only": false,
+    "max_write_amount": null,
+    "min_txn_date": null
+  },
+  "companies": {
+    "example-client": { "read_only": true },
+    "acme": { "max_write_amount": 10000, "min_txn_date": "2026-01-01" }
+  }
+}

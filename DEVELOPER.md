@@ -69,7 +69,7 @@ Windows (use `node.exe`, and **double** every backslash in JSON):
 }
 ```
 Fully **quit and reopen** Claude Desktop. `qbo` appears under
-**Settings → Connectors** with all 55 tools.
+**Settings → Connectors** with all 98 tools.
 
 ## Multiple companies (one connector)
 
@@ -92,23 +92,58 @@ never auto-pick — see the **Security** section of the README.
 
 Bundled at [`.claude/skills/add-qbo-company/`](.claude/skills/add-qbo-company/).
 Invoke it in Claude Code with `/add-qbo-company` (or ask to "add another
-QuickBooks company"). It handles the three moving parts — **authorize**
-(browser login → token file), **register** (adds the connector to the Claude
-Desktop config, with backup + idempotent edits), and **verify** (cross-checks
-that a company is both authorized and registered) — with Python helpers
-(`scripts/list_companies.py`, `scripts/register_connector.py`) and a
-troubleshooting reference.
+QuickBooks company"). It authorizes the company (browser login writes the token
+file), ensures the single unified `qbo` connector is registered (first time
+only, with backup + idempotent config edits), and verifies both, using Python
+helpers (`scripts/list_companies.py`, `scripts/register_connector.py`) and a
+troubleshooting reference. After the first setup, adding a company needs no
+restart. Legacy per-company `qbo-<slug>` connectors still work; the scripts
+report them and support migration to the unified entry.
 
-## Tools (55)
+## Tools (98)
 
 **Company selection & diagnostics (4):** `list_companies`, `select_company`,
 `get_active_company`, `health_check`
 
-**Reports & reads (15):** `get_profit_and_loss`, `get_balance_sheet`,
+**Interactive setup, no terminal (5):** `connect_company`, `check_connection`,
+`cancel_connection`, `set_company_policy`, `get_company_policy`
+
+**Client roster (3):** `list_clients`, `resolve_client`, `register_client`.
+Authorization stays the truth for which clients exist; `clients.json`
+(gitignored) adds the firm's names, aliases, engagement type, and working
+folder, and `list_clients` reports drift in both directions.
+
+**Fleet / multi-company (3):** `get_consolidated_profit_and_loss`,
+`get_consolidated_balance_sheet`, `create_journal_entry_multi`
+
+**Reconciliation & review (3):** `reconcile_bank_csv`,
+`find_duplicate_transactions`, `get_general_ledger_flat`
+
+**Search & lists (10):** `search_customers`, `search_vendors`, `search_items`,
+`search_accounts`, `search_terms`, `search_payment_methods`,
+`search_tax_codes`, `get_bills`, `get_payments`, `get_estimates` (all take
+typed, allowlisted `filters` plus sort)
+
+**AP payments & transfers (3):** `create_bill_payment`, `get_bill_payments`,
+`create_transfer`
+
+**Change tracking (1):** `get_changes_since` (QBO Change Data Capture, ~30 days)
+
+**Reports & reads (20):** `get_profit_and_loss`, `get_balance_sheet`,
 `get_cash_flow`, `get_aged_receivables`, `get_aged_payables`, `get_invoices`,
 `get_overdue_invoices`, `query`, `get_company_info`, `get_general_ledger`,
 `get_trial_balance`, `get_transaction_list`, `get_transaction_list_by_vendor`,
-`get_transaction_list_by_customer`, `get_transaction_list_with_splits`
+`get_transaction_list_by_customer`, `get_transaction_list_with_splits`,
+`get_customer_balance`, `get_sales_by_customer`, `get_vendor_balance`,
+`get_vendor_expenses`, `get_budgets`
+
+**Documents (2):** `get_invoice_pdf`, `get_estimate_pdf`
+
+**Setup entities (6):** `create_class`, `update_class`, `create_department`,
+`update_department`, `create_payment_method`, `create_term`
+
+**Danger zone (1):** `delete_transaction` (permanent; policy-checked and
+audit-logged)
 
 **Core writes (8):** `create_customer`, `update_customer`, `create_item`,
 `create_invoice`, `create_bill`, `create_account`, `send_invoice_email`,
@@ -127,15 +162,62 @@ troubleshooting reference.
 
 **People & items (3):** `create_employee`, `create_time_activity`, `update_item`
 
-**Attachments & advanced (3):** `attach_file`, `get_attachments`, `api_request`
+**Attachments & advanced (4):** `attach_file`, `get_attachments`, `api_get`,
+`api_request`
 
-> `api_request` is the escape hatch for anything not wrapped: pass a path under
-> `/v3/company/{realmId}` (e.g. `/reports/ProfitAndLossDetail?...`,
-> `/query?query=SELECT * FROM Bill`) and it handles auth, realm, and minorversion.
+> `api_get` and `api_request` are the escape hatches for anything not wrapped:
+> pass a path under `/v3/company/{realmId}` (e.g.
+> `/reports/ProfitAndLossDetail?...`, `/query?query=SELECT * FROM Bill`) and
+> auth, realm, and minorversion are handled. `api_get` is read-only (safe to
+> always-allow); `api_request` can POST and belongs behind approval.
 
 ## Notes
 
 - Line-item tools accept account/item/customer references by **name or Id**.
+  A near-miss on a name (case/spacing) resolves when unambiguous; otherwise the
+  error lists close matches.
+- Line items accept an optional **`class`**; sales lines accept **`tax_code`**
+  (TAX/NON or a TaxCode name); most posting tools accept a header **`location`**
+  (department). All require the matching QBO tracking feature to be enabled.
+- **Token files are encrypted at rest** (AES-256-GCM). The master key lives in
+  the macOS Keychain / Windows DPAPI, or a `0600` `.qbo-key` file elsewhere.
+  `QBO_TOKEN_ENCRYPTION=off` keeps legacy plaintext. Legacy files migrate to
+  encrypted automatically on first read.
+- **Every write is audit-logged** to `audit-log/audit-YYYY-MM.jsonl` (tool-agnostic,
+  hooked at the API layer), including Intuit's `intuit_tid` trace id. `QBO_AUDIT=off`
+  disables; `QBO_AUDIT_DIR` relocates.
+- **Closed-period guardrail:** writes dated on or before the company's
+  books-closed date return a warning (`QBO_CLOSED_PERIOD=block` refuses instead).
+- **Offboarding:** `npm run disconnect -- <slug>` revokes the OAuth grant with
+  Intuit, then deletes the token file.
+- List tools return **compact rows** by default; pass `verbose: true` for full
+  QBO entities. Results paginate up to 1,000 rows with a `truncated` flag.
+- `import_transactions_from_csv` is sign-aware (credits are never imported as
+  expenses), normalizes dates, and is **idempotent**: each import is journaled
+  locally so a re-run after a failure skips rows that already posted.
+- **Per-company policies** (optional `qbo-policy.json`, see
+  `qbo-policy.example.json`; `QBO_POLICY_FILE` overrides the path): `read_only`
+  companies, `max_write_amount` ceilings, and a `min_txn_date` floor, enforced
+  centrally at the API layer so every write tool (including `api_request`)
+  obeys them.
+- **Fleet tools** merge per-company report trees by account name;
+  `create_journal_entry_multi` requires an explicit company list and returns
+  per-company results.
+- **Reconciliation** matches statement rows to Purchases/Deposits on exact
+  amount within a date tolerance; transfers and bill payments are not scanned.
+- Name-index lookups (fuzzy matching, suggestions) are cached for 60 seconds
+  per company and entity; exact-name lookups always hit the API directly.
+- **Verb-category kill switches** (pattern from Intuit's MIT MCP server):
+  `QBO_DISABLE_WRITES=true` skips registering every write-capable tool;
+  `QBO_DISABLE_DELETES=true` skips only deletes/voids. Suppressed tools never
+  appear in the client. Read tools are always registered.
+- **Advanced search filters:** every search/list tool takes
+  `filters: [{field, value, operator}]` validated against a per-entity
+  allowlist of QBO's filterable columns (operators `=`, `<`, `>`, `<=`, `>=`,
+  `LIKE`, `IN`), plus `order_by`/`descending` on the name searches.
+- PDFs save under `exports/` by default (gitignored); cap the download size
+  with `QBO_PDF_MAX_BYTES`.
+- Tests: `npm test` (vitest). CI runs syntax checks, tests, and `npm audit`.
 - Item-based tools (purchase orders, item-based bills) need **purchasable**
   items (ones with an expense account).
 - `import_transactions_from_csv` supports a `dry_run` preview; live posting is
@@ -146,10 +228,26 @@ troubleshooting reference.
 
 ## Architecture
 
-- `src/qbo.js` — OAuth (authorize / refresh), per-company token resolution,
-  authenticated request + multipart upload helpers, company discovery.
-- `src/index.js` — the MCP server: tool definitions, company-resolution +
-  write-gate, line-item builders.
+- `src/qbo.js`: OAuth (authorize / refresh / revoke), per-company token
+  resolution, retry/timeout policy, authenticated request + upload helpers,
+  company discovery, audit hook.
+- `src/index.js`: the MCP server: tool definitions, company resolution and
+  the write-gate.
+- `src/entities.js`: entity lookups, tolerant name resolution with
+  suggestions, paginated queries, closed-period guardrail.
+- `src/lines.js`: line-item schemas and builders (class/location/tax aware).
+- `src/secure-store.js`: AES-256-GCM token encryption and master-key
+  providers (Keychain, DPAPI, key file).
+- `src/audit.js`: append-only JSONL write audit log.
+- `src/csv.js`: bank CSV parsing, import planning, idempotency journal.
+- `src/reports.js`: report-tree flattening, multi-company consolidation, flat
+  GL export with review flags.
+- `src/reconcile.js`: statement-vs-register matching, duplicate detection.
+- `src/policy.js`: per-company write policies (read-only, amount ceiling, date
+  floor), enforced in `qboRequest`.
+- `src/compact.js`: trimmed list-response shapes.
+- `src/util.js`: pure helpers (escaping, id validation, balance checks).
+- `test/`: vitest unit tests; `.github/workflows/ci.yml`: CI.
 
 ## Troubleshooting
 

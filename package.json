@@ -1,13 +1,15 @@
 {
   "name": "qbo-mcp-server",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Custom MCP server connecting Claude Desktop directly to QuickBooks Online (read + write).",
   "type": "module",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "connect": "node src/index.js --connect",
-    "connect:batch": "node src/index.js --connect-batch"
+    "connect:batch": "node src/index.js --connect-batch",
+    "disconnect": "node src/index.js --disconnect",
+    "test": "vitest run"
   },
   "engines": {
     "node": ">=18"
@@ -16,5 +18,8 @@
     "@modelcontextprotocol/sdk": "^1.12.0",
     "dotenv": "^16.4.5",
     "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.10"
   }
 }

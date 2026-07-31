@@ -10,13 +10,20 @@
 // Write tools never auto-pick a company — they require an explicit arg or a
 // session/env default, so a transaction can never post to the wrong books.
 
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 // Load .env by absolute path (relative to this file), not the current working
 // directory — Claude Desktop launches the server from a different cwd.
-dotenv.config({ path: path.join(path.dirname(fileURLToPath(import.meta.url)), "..", ".env") });
+const dotenvResult = dotenv.config({ path: path.join(path.dirname(fileURLToPath(import.meta.url)), "..", ".env") });
+// Host apps can inject empty-string env values, which would otherwise beat the
+// .env file (a failure mode reported against Intuit's MCP server). Treat empty
+// as unset, but never clobber a real value: shell overrides like
+// `QBO_ENVIRONMENT=production npm run connect` must still win.
+for (const [k, v] of Object.entries(dotenvResult.parsed || {})) {
+  if (process.env[k] === "") process.env[k] = v;
+}
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -24,15 +31,57 @@ import { z } from "zod";
 import {
   qboRequest,
   qboQuery,
+  qboRequestBinary,
   qboUpload,
   getRealmId,
   getValidTokens,
   runAuthorizationFlow,
   runBatchAuthorization,
+  disconnectCompany,
+  beginAuthorization,
+  authorizationStatus,
+  cancelAuthorization,
   deriveSlugFromRealm,
   listCompanies,
   sanitizeSlug,
 } from "./qbo.js";
+import { todayISO, esc, assertId, guessContentType, expandHome } from "./util.js";
+import {
+  QUERY_PAGE_SIZE,
+  qboQueryAll,
+  resolveRef,
+  fetchEntity,
+  readJournalEntry,
+  findCustomerByName,
+  findVendorByName,
+  findAccountByName,
+  findAnyIncomeAccount,
+  findAnyServiceItem,
+  suggestNames,
+  notFoundError,
+  closedPeriodWarnings,
+  withWarnings,
+  buildWhere,
+} from "./entities.js";
+import {
+  journalLineSchema,
+  salesLineSchema,
+  accountLineSchema,
+  itemLineSchema,
+  depositLineSchema,
+  buildJournalLines,
+  buildSalesLines,
+  buildAccountLines,
+  buildItemExpenseLines,
+  buildDepositLines,
+  departmentRef,
+} from "./lines.js";
+import { compactList } from "./compact.js";
+import { parseCSV, planImport, importId, rowMarker, postedRows, recordPosted } from "./csv.js";
+import { flattenReport, consolidateReports, glFlatten, flagGlRows } from "./reports.js";
+import { matchTransactions, findDuplicateGroups } from "./reconcile.js";
+import { checkWritePolicy, policyFor, setCompanyPolicy, policyPath } from "./policy.js";
+import { roster, resolveClient, registerClient, clientsPath } from "./clients.js";
 
 const log = (...a) => console.error("[qbo-mcp]", ...a);
 
@@ -110,8 +159,26 @@ if (process.argv.includes("--connect-batch")) {
   }
 }
 
+// ---- Disconnect: revoke the grant, then remove the token file --------------
+// `npm run disconnect -- <slug>`. Offboarding a client is not complete until
+// the OAuth grant is revoked on Intuit's side; deleting the file alone would
+// leave the grant live until it expires on its own.
+if (process.argv.includes("--disconnect")) {
+  const i = process.argv.indexOf("--disconnect");
+  const next = process.argv[i + 1];
+  const slug = next && !next.startsWith("--") ? next : process.env.QBO_COMPANY || "";
+  try {
+    const r = await disconnectCompany(slug);
+    log(`Disconnected ${r.slug || "the default company"} (realm ${r.realmId ?? "unknown"}).`);
+    log("If this company had its own qbo-<slug> entry in the Claude Desktop config, remove it and restart Claude Desktop.");
+    process.exit(0);
+  } catch (e) {
+    log("Disconnect failed:", e.message);
+    process.exit(1);
+  }
+}
+
 // ---- helpers ---------------------------------------------------------------
-const todayISO = () => new Date().toISOString().slice(0, 10);
 const asText = (obj) => ({ content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj, null, 2) }] });
 
 const asError = (msg) => ({
@@ -131,20 +198,6 @@ function tool(handler) {
   };
 }
 
-function esc(v) {
-  // Backslashes first, then quotes. Otherwise a value ending in a backslash
-  // would escape the closing quote and break out of the string literal.
-  return String(v).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-}
-
-// QuickBooks entity Ids are numeric. Validate before interpolating one into a
-// query or URL path so a crafted "Id" can never change the request shape.
-function assertId(v, what = "Id") {
-  const s = String(v).trim();
-  if (!/^\d+$/.test(s)) throw new Error(`${what} must be a numeric QuickBooks Id, got "${v}".`);
-  return s;
-}
-
 // Build a QBO report query string from a params object, dropping empties.
 function reportQuery(params) {
   const qs = Object.entries(params)
@@ -152,25 +205,6 @@ function reportQuery(params) {
     .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
     .join("&");
   return qs ? `?${qs}` : "";
-}
-
-// Page a SELECT query with STARTPOSITION/MAXRESULTS until exhausted or a hard
-// ceiling, so callers never mistake a single page for the full result set.
-// `baseSql` must not already contain STARTPOSITION or MAXRESULTS.
-const QUERY_PAGE_SIZE = 100; // QBO's default page size
-async function qboQueryAll(baseSql, entity, { company, maxTotal = 1000 } = {}) {
-  const rows = [];
-  let start = 1;
-  let truncated = false;
-  for (;;) {
-    const page =
-      (await qboQuery(`${baseSql} STARTPOSITION ${start} MAXRESULTS ${QUERY_PAGE_SIZE}`, { company }))[entity] || [];
-    rows.push(...page);
-    if (page.length < QUERY_PAGE_SIZE) break;
-    if (rows.length >= maxTotal) { truncated = true; break; }
-    start += QUERY_PAGE_SIZE;
-  }
-  return { rows, truncated };
 }
 
 // ---- company selection -----------------------------------------------------
@@ -205,13 +239,20 @@ async function resolveCompany(explicit, { write = false } = {}) {
         `No such company "${explicit}". Available: ${formatCompanyList(companies)}.`
       );
     }
+    if (write) await checkWritePolicy(slug, null); // fail fast on read-only companies
     return slug;
   }
   // 2. Session default (set via select_company).
-  if (sessionDefault) return sessionDefault;
+  if (sessionDefault) {
+    if (write) await checkWritePolicy(sessionDefault, null);
+    return sessionDefault;
+  }
   // 3. Env default (legacy per-connector QBO_COMPANY).
   const envDefault = envDefaultCompany();
-  if (envDefault) return envDefault;
+  if (envDefault) {
+    if (write) await checkWritePolicy(envDefault, null);
+    return envDefault;
+  }
   // 4. Convenience fallbacks.
   const companies = await listCompanies();
   if (companies.length === 0) return ""; // pure legacy single-file / default connector
@@ -225,239 +266,37 @@ async function resolveCompany(explicit, { write = false } = {}) {
   );
 }
 
-// ---- entity lookups (all company-scoped) -----------------------------------
-async function findCustomerByName(name, company) {
-  const r = await qboQuery(`SELECT * FROM Customer WHERE DisplayName = '${esc(name)}'`, { company });
-  return r.Customer?.[0] || null;
-}
-async function findVendorByName(name, company) {
-  const r = await qboQuery(`SELECT * FROM Vendor WHERE DisplayName = '${esc(name)}'`, { company });
-  return r.Vendor?.[0] || null;
-}
-async function findAccountByName(name, company) {
-  const r = await qboQuery(`SELECT * FROM Account WHERE Name = '${esc(name)}'`, { company });
-  return r.Account?.[0] || null;
-}
-async function findAnyIncomeAccount(company) {
-  const r = await qboQuery(`SELECT * FROM Account WHERE AccountType = 'Income' MAXRESULTS 1`, { company });
-  return r.Account?.[0] || null;
-}
-async function findAnyServiceItem(company) {
-  const r = await qboQuery(`SELECT * FROM Item WHERE Type = 'Service' MAXRESULTS 1`, { company });
-  return r.Item?.[0] || null;
-}
-
-// ---- journal-entry helpers -------------------------------------------------
-// One line of a journal entry. Debits and credits across all lines must balance.
-const journalLineSchema = z.object({
-  account: z.string().describe("Account name or Id to post this line to"),
-  amount: z.number().positive().describe("Positive amount; direction is set by posting_type"),
-  posting_type: z.enum(["Debit", "Credit"]),
-  description: z.string().optional().describe("Per-line memo"),
-  entity_name: z.string().optional().describe("Optional customer/vendor/employee to tag this line to"),
-  entity_type: z.enum(["Customer", "Vendor", "Employee"]).optional().describe("Required if entity_name is set"),
-});
-
-// Resolve a name/vendor/employee referenced on a journal line to its Id.
-async function resolveEntityId(name, type, company) {
-  const r = await qboQuery(`SELECT * FROM ${type} WHERE DisplayName = '${esc(name)}'`, { company });
-  const rec = r[type]?.[0];
-  if (!rec) throw new Error(`${type} not found for journal-line entity: "${name}"`);
-  return rec.Id;
-}
-
-// Turn the ergonomic line schema into QBO JournalEntryLineDetail lines, resolving
-// account (and any entity) references and asserting the entry balances.
-async function buildJournalLines(lines, company) {
-  if (!Array.isArray(lines) || lines.length < 2) {
-    throw new Error("A journal entry needs at least two lines, with total debits equal to total credits.");
-  }
-  let debit = 0, credit = 0;
-  const out = [];
-  for (const li of lines) {
-    let acct;
-    if (/^\d+$/.test(String(li.account))) {
-      const found = (await qboQuery(`SELECT * FROM Account WHERE Id = '${esc(li.account)}'`, { company })).Account?.[0];
-      acct = found ? { Id: found.Id, Name: found.Name } : { Id: String(li.account) };
-    } else {
-      const found = await findAccountByName(li.account, company);
-      if (!found) throw new Error(`Account not found for journal line: "${li.account}"`);
-      acct = { Id: found.Id, Name: found.Name };
-    }
-    const detail = {
-      PostingType: li.posting_type,
-      AccountRef: { value: acct.Id, ...(acct.Name ? { name: acct.Name } : {}) },
-    };
-    if (li.entity_name) {
-      if (!li.entity_type) throw new Error(`entity_type is required when entity_name is set (line account "${li.account}").`);
-      detail.Entity = { Type: li.entity_type, EntityRef: { value: await resolveEntityId(li.entity_name, li.entity_type, company) } };
-    }
-    const line = { Amount: li.amount, DetailType: "JournalEntryLineDetail", JournalEntryLineDetail: detail };
-    if (li.description) line.Description = li.description;
-    out.push(line);
-    if (li.posting_type === "Debit") debit += Number(li.amount);
-    else credit += Number(li.amount);
-  }
-  if (Math.abs(debit - credit) > 0.005) {
-    throw new Error(`Journal entry is not balanced: debits ${debit.toFixed(2)} vs credits ${credit.toFixed(2)}.`);
-  }
-  return out;
-}
-
-async function readJournalEntry(id, company) {
-  const r = await qboRequest(`/journalentry/${encodeURIComponent(assertId(id, "journal_entry_id"))}`, { company });
-  const entry = r.JournalEntry;
-  if (!entry) throw new Error(`No journal entry with Id ${id}`);
-  return entry;
-}
-
-// ---- shared ref/line helpers for the extended entity tools -----------------
-// Resolve a name-or-Id to a QBO {value, name} reference for any entity.
-async function resolveRef(entity, nameOrId, company, nameField = "DisplayName") {
-  if (/^\d+$/.test(String(nameOrId))) {
-    const rec = (await qboQuery(`SELECT * FROM ${entity} WHERE Id = '${esc(nameOrId)}'`, { company }))[entity]?.[0];
-    return rec ? { value: rec.Id, name: rec[nameField] || rec.Name } : { value: String(nameOrId) };
-  }
-  const rec = (await qboQuery(`SELECT * FROM ${entity} WHERE ${nameField} = '${esc(nameOrId)}'`, { company }))[entity]?.[0];
-  if (!rec) throw new Error(`${entity} not found: "${nameOrId}"`);
-  return { value: rec.Id, name: rec[nameField] || rec.Name };
-}
-
-// Fetch a full entity record (for its SyncToken) before a sparse update / void / delete.
-async function fetchEntity(entity, id, company) {
-  const cleanId = assertId(id, `${entity} Id`);
-  const rec = (await qboQuery(`SELECT * FROM ${entity} WHERE Id = '${cleanId}'`, { company }))[entity]?.[0];
-  if (!rec) throw new Error(`No ${entity} with Id ${cleanId}`);
-  return rec;
-}
-
-// Line schemas shared across the transaction tools.
-const salesLineSchema = z.object({
-  amount: z.number().describe("Line amount"),
-  item: z.string().optional().describe("Product/Service name or Id (defaults to any Service item)"),
-  description: z.string().optional(),
-  quantity: z.number().optional(),
-  unit_price: z.number().optional(),
-});
-const accountLineSchema = z.object({
-  account: z.string().describe("Account name or Id to categorize against"),
-  amount: z.number(),
-  description: z.string().optional(),
-});
-const itemLineSchema = z.object({
-  item: z.string().describe("Product/Service name or Id"),
-  amount: z.number(),
-  quantity: z.number().optional(),
-  unit_price: z.number().optional(),
-  description: z.string().optional(),
-});
-const depositLineSchema = z.object({
-  account: z.string().describe("Source account name or Id (e.g. an income account or Undeposited Funds)"),
-  amount: z.number(),
-  description: z.string().optional(),
-  entity_name: z.string().optional(),
-  entity_type: z.enum(["Customer", "Vendor", "Employee"]).optional(),
-});
-
-// Sales transactions (Invoice/Estimate/SalesReceipt/CreditMemo/RefundReceipt).
-async function buildSalesLines(lines, company) {
-  const out = [];
-  for (const li of lines) {
-    const detail = {};
-    if (li.item) detail.ItemRef = await resolveRef("Item", li.item, company, "Name");
-    else { const it = await findAnyServiceItem(company); if (it) detail.ItemRef = { value: it.Id, name: it.Name }; }
-    if (li.quantity != null) detail.Qty = li.quantity;
-    if (li.unit_price != null) detail.UnitPrice = li.unit_price;
-    const line = { Amount: li.amount, DetailType: "SalesItemLineDetail", SalesItemLineDetail: detail };
-    if (li.description) line.Description = li.description;
-    out.push(line);
-  }
-  return out;
-}
-
-// Account-based expense lines (account-based Bill / Expense / VendorCredit).
-async function buildAccountLines(lines, company) {
-  const out = [];
-  for (const li of lines) {
-    const line = {
-      Amount: li.amount,
-      DetailType: "AccountBasedExpenseLineDetail",
-      AccountBasedExpenseLineDetail: { AccountRef: await resolveRef("Account", li.account, company, "Name") },
-    };
-    if (li.description) line.Description = li.description;
-    out.push(line);
-  }
-  return out;
-}
-
-// Item-based expense lines (item-based Bill / PurchaseOrder).
-async function buildItemExpenseLines(lines, company) {
-  const out = [];
-  for (const li of lines) {
-    const detail = { ItemRef: await resolveRef("Item", li.item, company, "Name") };
-    if (li.quantity != null) detail.Qty = li.quantity;
-    if (li.unit_price != null) detail.UnitPrice = li.unit_price;
-    const line = { Amount: li.amount, DetailType: "ItemBasedExpenseLineDetail", ItemBasedExpenseLineDetail: detail };
-    if (li.description) line.Description = li.description;
-    out.push(line);
-  }
-  return out;
-}
-
-// Deposit lines.
-async function buildDepositLines(lines, company) {
-  const out = [];
-  for (const li of lines) {
-    const detail = { AccountRef: await resolveRef("Account", li.account, company, "Name") };
-    if (li.entity_name) {
-      if (!li.entity_type) throw new Error("entity_type is required when entity_name is set on a deposit line.");
-      detail.Entity = await resolveRef(li.entity_type, li.entity_name, company, "DisplayName");
-    }
-    const line = { Amount: li.amount, DetailType: "DepositLineDetail", DepositLineDetail: detail };
-    if (li.description) line.Description = li.description;
-    out.push(line);
-  }
-  return out;
-}
-
-function guessContentType(name) {
-  const ext = (name.split(".").pop() || "").toLowerCase();
-  const map = {
-    pdf: "application/pdf", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
-    gif: "image/gif", csv: "text/csv", txt: "text/plain",
-    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  };
-  return map[ext] || "application/octet-stream";
-}
-
-// Parse a simple CSV (handles quoted fields and commas inside quotes).
-function parseCSV(text) {
-  const rows = [];
-  let field = "", row = [], inQ = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (inQ) {
-      if (c === '"' && text[i + 1] === '"') { field += '"'; i++; }
-      else if (c === '"') inQ = false;
-      else field += c;
-    } else if (c === '"') inQ = true;
-    else if (c === ",") { row.push(field); field = ""; }
-    else if (c === "\n" || c === "\r") {
-      if (c === "\r" && text[i + 1] === "\n") i++;
-      if (field !== "" || row.length) { row.push(field); rows.push(row); row = []; field = ""; }
-    } else field += c;
-  }
-  if (field !== "" || row.length) { row.push(field); rows.push(row); }
-  return rows;
-}
-
 // ---- MCP server ------------------------------------------------------------
 const server = new McpServer({ name: "qbo-mcp-server", version: "1.0.0" });
 
+// Registration wrapper with verb-category kill switches (pattern from Intuit's
+// MIT-licensed MCP server). QBO_DISABLE_WRITES=true suppresses registering any
+// tool that can change the books or send anything outward; the narrower
+// QBO_DISABLE_DELETES=true suppresses only deletes/voids. Suppressed tools
+// never appear in the client at all, which is stronger than blocking at call
+// time. Read tools are always registered.
+const DISABLE_WRITES = (process.env.QBO_DISABLE_WRITES || "").toLowerCase() === "true";
+const DISABLE_DELETES = DISABLE_WRITES || (process.env.QBO_DISABLE_DELETES || "").toLowerCase() === "true";
+const WRITE_PREFIXES = /^(create_|update_|send_|void_|delete_|import_|attach_)/;
+const WRITE_EXTRAS = new Set(["api_request"]);
+const DELETE_PREFIXES = /^(delete_|void_)/;
+
+const rawRegister = server.tool.bind(server);
+let suppressedTools = 0;
+function registerTool(name, description, schema, handler) {
+  if (
+    (DISABLE_DELETES && DELETE_PREFIXES.test(name)) ||
+    (DISABLE_WRITES && (WRITE_PREFIXES.test(name) || WRITE_EXTRAS.has(name)))
+  ) {
+    suppressedTools++;
+    return;
+  }
+  rawRegister(name, description, schema, handler);
+}
+
 /* ==================== COMPANY TOOLS & DIAGNOSTICS (4) ==================== */
 
-server.tool(
+registerTool(
   "list_companies",
   "List every QuickBooks company this connector can access (each an authorized tokens.<slug>.json), with realmId and environment, plus the current active default.",
   {},
@@ -471,7 +310,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "select_company",
   "Set the active QuickBooks company for subsequent tool calls (persists until changed or the server restarts). Individual tools can still override it with their own `company` argument.",
   { company: z.string().describe("Company slug from list_companies, e.g. 8315") },
@@ -487,7 +326,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "get_active_company",
   "Show which QuickBooks company is currently active (the default for calls that omit `company`) and how it was determined.",
   {},
@@ -507,7 +346,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "health_check",
   "Verify connectivity for one company or every connected company: token freshness (refreshing if due), realm, environment, and a live API round trip. The fastest first step when something is not working.",
   {
@@ -554,9 +393,199 @@ server.tool(
   })
 );
 
+/* =========================== CLIENT ROSTER (3) =========================== */
+// Human names for the companies this connector can reach. Authorization stays
+// the truth for existence; these tools add the labels people actually type.
+
+registerTool(
+  "list_clients",
+  "The client roster: every company this connector can reach, with the firm's name for it, aliases, engagement type, and service lines. Also reports drift, meaning companies with no labels yet and labels with no authorization. Start here when you need to know who is set up.",
+  {},
+  tool(async () => {
+    const r = await roster();
+    return asText({
+      count: r.clients.length,
+      ...r,
+      unlabeled: r.unlabeled.length ? r.unlabeled : undefined,
+      labeled_but_not_authorized: r.labeled_but_not_authorized.length ? r.labeled_but_not_authorized : undefined,
+      hint: r.unlabeled.length
+        ? "Unlabeled companies resolve only by slug. Give them names and aliases with register_client."
+        : undefined,
+      roster_file: clientsPath(),
+    });
+  })
+);
+
+registerTool(
+  "resolve_client",
+  "Turn what someone typed (a name, nickname, abbreviation, or slug) into the right company slug. Returns candidates instead of guessing when the term is ambiguous, so a wrong client can never be assumed. Use before any per-client work when the user named a client in prose.",
+  { term: z.string().describe("What the user called the client, e.g. \"Advance\", \"PSSA\", \"the firm\"") },
+  tool(async ({ term }) => {
+    const r = await resolveClient(term);
+    if (r.match) return asText({ resolved: r.match.slug, matched_by: r.how, client: r.match });
+    return asText({
+      resolved: null,
+      matched_by: r.how,
+      candidates: r.candidates,
+      all_clients: r.all,
+      guidance: r.candidates?.length
+        ? "Ambiguous. Ask the user which of these they meant; do not pick one."
+        : "No match. Ask which client they mean, or onboard them if they are new.",
+    });
+  })
+);
+
+registerTool(
+  "register_client",
+  "Record or update the firm's labels for a company: display name, aliases people type, engagement type, service lines, and working folder. Aliases merge rather than replace, so short forms accumulate. Use during onboarding, and any time someone refers to a client by a name the connector did not recognize.",
+  {
+    company: z.string().describe("Company slug these labels belong to"),
+    name: z.string().optional().describe("The firm's name for this client"),
+    company_name: z.string().optional().describe("Legal or QuickBooks company name, when it differs"),
+    aliases: z.array(z.string()).optional().describe("Short forms people type, e.g. [\"PSSA\", \"Power Systems\"]"),
+    remove_aliases: z.array(z.string()).optional(),
+    engagement: z.string().optional().describe("e.g. monthly bookkeeping, tax only, fractional CFO, cleanup diagnostic"),
+    service_lines: z.array(z.string()).optional().describe("e.g. [\"tax\", \"CAS\"]"),
+    data_folder: z.string().optional().describe("Absolute path to this client's working folder"),
+  },
+  tool(async ({ company, ...patch }) => asText(await registerClient(company, patch)))
+);
+
+/* ==================== INTERACTIVE AUTHORIZATION (3) ==================== */
+// Connecting a company without a terminal. connect_company hands back a link,
+// the human clicks Allow, then check_connection confirms which file landed.
+
+registerTool(
+  "connect_company",
+  "Start connecting a NEW QuickBooks company from this conversation, no terminal needed. Returns an Intuit authorization link for the user to click; it does not wait for them. After they click Allow, call check_connection to confirm. Give each company a short slug (letters, numbers, hyphens) that stays with it.",
+  {
+    company: z.string().describe("Short slug for this company, e.g. acme or mhpe. Becomes tokens.<slug>.json"),
+    environment: z.enum(["sandbox", "production"]).describe("production for real client books, sandbox for Intuit test files"),
+    open_browser: z.boolean().optional().describe("Also try to open the link locally (default true)"),
+  },
+  tool(async ({ company, environment, open_browser }) => {
+    const slug = sanitizeSlug(company);
+    if (!slug) throw new Error("company must contain at least one letter, number, or hyphen.");
+    const existing = (await listCompanies()).find((c) => c.slug === slug);
+    const r = await beginAuthorization({ company: slug, environment, openBrowserWindow: open_browser !== false });
+    return asText({
+      ...r,
+      already_connected: existing
+        ? { realmId: existing.realmId, environment: existing.environment, note: "Completing this will replace that authorization." }
+        : undefined,
+      next_step: "Give the user the authorize_url to click, have them log in and pick the right company, then call check_connection.",
+      reminder: environment === "production"
+        ? "Production: these are real books. Confirm the company name with check_connection before anything is posted."
+        : undefined,
+    });
+  })
+);
+
+registerTool(
+  "check_connection",
+  "Check whether an in-progress connect_company authorization finished, and confirm which QuickBooks company actually landed. Call this after the user clicks Allow. Safe to call repeatedly.",
+  {},
+  tool(async () => {
+    const status = authorizationStatus();
+    if (status.state !== "connected") {
+      const guidance = {
+        idle: "No authorization in progress. Start one with connect_company.",
+        waiting: "Still waiting on the browser. Ask the user to finish at the authorize_url, then check again.",
+        failed: "Authorization failed. Read the error, fix the cause, then call connect_company again.",
+        expired: "The authorization window closed before the callback arrived. Call connect_company again.",
+      }[status.state];
+      return asText({ ...status, guidance });
+    }
+    // Connected: name the file so a wrong-company authorization cannot pass silently.
+    let company_name = null, legal_name = null, address_state = null, warning;
+    try {
+      const info = await qboRequest(`/companyinfo/${status.realmId}`, { company: status.slug });
+      company_name = info.CompanyInfo?.CompanyName ?? null;
+      legal_name = info.CompanyInfo?.LegalName ?? null;
+      address_state = info.CompanyInfo?.CompanyAddr?.CountrySubDivisionCode ?? null;
+    } catch (e) {
+      warning = `Connected, but reading company info failed: ${e.message}`;
+    }
+    const twins = (await listCompanies()).filter((c) => c.realmId === status.realmId && c.slug !== status.slug);
+    return asText({
+      ...status,
+      company_name,
+      legal_name,
+      address_state,
+      warning,
+      duplicate_slugs: twins.length ? twins.map((c) => c.slug) : undefined,
+      verify: "Confirm company_name is the client you intended. If it is not, connect_company again and pick the right file.",
+    });
+  })
+);
+
+// Guardrail tools. Deliberately not named with a write prefix, so locking a
+// company down stays available even when QBO_DISABLE_WRITES has suppressed
+// every posting tool.
+registerTool(
+  "set_company_policy",
+  "Set the write guardrail for one company: make it read-only, cap the size of a single write, or refuse writes dated before a floor. Takes effect immediately with no restart, and leaves other companies' rules alone. Use read_only when onboarding, during a diagnostic engagement, or any time a client's books should not be posted to.",
+  {
+    company: z.string().describe("Company slug the rule applies to"),
+    read_only: z.boolean().optional().describe("true refuses all writes; false lifts it"),
+    max_write_amount: z.number().min(0).optional().describe("Refuse writes above this total; 0 removes the cap"),
+    min_txn_date: z.string().optional().describe("YYYY-MM-DD floor for transaction dates; \"clear\" removes it"),
+  },
+  tool(async ({ company, read_only, max_write_amount, min_txn_date }) => {
+    const slug = sanitizeSlug(company);
+    if (!slug) throw new Error("company must contain at least one letter, number, or hyphen.");
+    const known = await listCompanies();
+    if (known.length && !known.some((c) => c.slug === slug)) {
+      throw new Error(`No such company "${company}". Available: ${formatCompanyList(known)}.`);
+    }
+    if (read_only === undefined && max_write_amount === undefined && min_txn_date === undefined) {
+      throw new Error("Nothing to change. Pass read_only, max_write_amount, or min_txn_date.");
+    }
+    const r = await setCompanyPolicy(slug, {
+      read_only,
+      max_write_amount,
+      min_txn_date: min_txn_date === "clear" ? null : min_txn_date,
+    });
+    return asText({
+      ...r,
+      effective: "Immediately. The connector re-reads this file on every write.",
+      note: Object.keys(r.rules).length === 0 ? "No restrictions remain for this company." : undefined,
+    });
+  })
+);
+
+registerTool(
+  "get_company_policy",
+  "Show the write guardrails currently in force, for one company or all of them. Worth checking before posting anything to a client's books, and when a write is refused and the reason is unclear.",
+  { company: companyArg },
+  tool(async ({ company }) => {
+    if (company) {
+      const slug = sanitizeSlug(company);
+      return asText({ company: slug, rules: await policyFor(slug), policy_file: policyPath() });
+    }
+    const companies = await listCompanies();
+    const rows = [];
+    for (const c of companies) rows.push({ company: c.slug, rules: await policyFor(c.slug) });
+    const restricted = rows.filter((r) => Object.keys(r.rules).length);
+    return asText({
+      policy_file: policyPath(),
+      restricted_companies: restricted.length,
+      companies: rows,
+      note: restricted.length ? undefined : "No guardrails in force; every connected company is writable.",
+    });
+  })
+);
+
+registerTool(
+  "cancel_connection",
+  "Abandon an in-progress company authorization and release the callback port. Use when the user gives up, picked the wrong company, or wants to restart with different keys.",
+  {},
+  tool(async () => asText(cancelAuthorization()))
+);
+
 /* =========================== READ TOOLS (9) =========================== */
 
-server.tool(
+registerTool(
   "get_profit_and_loss",
   "Profit & Loss report for a date range (YYYY-MM-DD).",
   { start_date: z.string().describe("YYYY-MM-DD"), end_date: z.string().describe("YYYY-MM-DD"), company: companyArg },
@@ -566,7 +595,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "get_balance_sheet",
   "Balance Sheet report for a date range (YYYY-MM-DD).",
   { start_date: z.string(), end_date: z.string(), company: companyArg },
@@ -576,7 +605,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "get_cash_flow",
   "Statement of Cash Flows for a date range (YYYY-MM-DD).",
   { start_date: z.string(), end_date: z.string(), company: companyArg },
@@ -586,7 +615,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "get_aged_receivables",
   "Aged Receivables summary (who owes you, bucketed by age).",
   { company: companyArg },
@@ -596,7 +625,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "get_aged_payables",
   "Aged Payables summary (who you owe, bucketed by age).",
   { company: companyArg },
@@ -606,7 +635,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "get_invoices",
   "List invoices, optionally filtered by status (paid|open|overdue), customer_id, and date range.",
   {
@@ -614,9 +643,10 @@ server.tool(
     customer_id: z.string().optional(),
     start_date: z.string().optional(),
     end_date: z.string().optional(),
+    verbose: z.boolean().optional().describe("Return full QBO entities instead of compact rows"),
     company: companyArg,
   },
-  tool(async ({ status, customer_id, start_date, end_date, company }) => {
+  tool(async ({ status, customer_id, start_date, end_date, verbose, company }) => {
     const c = await resolveCompany(company);
     const where = [];
     if (customer_id) where.push(`CustomerRef = '${assertId(customer_id, "customer_id")}'`);
@@ -629,15 +659,18 @@ server.tool(
     if (status === "overdue") where.push(`Balance > '0'`, `DueDate < '${todayISO()}'`);
     const sql = `SELECT * FROM Invoice${where.length ? " WHERE " + where.join(" AND ") : ""} ORDERBY TxnDate DESC`;
     const { rows, truncated } = await qboQueryAll(sql, "Invoice", { company: c });
-    return asText({ count: rows.length, truncated, invoices: rows });
+    return asText({ count: rows.length, truncated, invoices: compactList("Invoice", rows, verbose) });
   })
 );
 
-server.tool(
+registerTool(
   "get_overdue_invoices",
   "All invoices with an outstanding balance whose due date has passed.",
-  { company: companyArg },
-  tool(async ({ company }) => {
+  {
+    verbose: z.boolean().optional().describe("Return full QBO entities instead of compact rows"),
+    company: companyArg,
+  },
+  tool(async ({ verbose, company }) => {
     const c = await resolveCompany(company);
     const today = todayISO();
     const { rows, truncated } = await qboQueryAll(
@@ -645,11 +678,11 @@ server.tool(
       "Invoice",
       { company: c }
     );
-    return asText({ as_of: today, count: rows.length, truncated, invoices: rows });
+    return asText({ as_of: today, count: rows.length, truncated, invoices: compactList("Invoice", rows, verbose) });
   })
 );
 
-server.tool(
+registerTool(
   "query",
   "Run a QBO SQL-style query against any entity, e.g. \"SELECT * FROM Customer\".",
   { sql_query: z.string(), company: companyArg },
@@ -670,7 +703,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "get_company_info",
   "Basic information about the connected QuickBooks company.",
   { company: companyArg },
@@ -686,7 +719,7 @@ server.tool(
 const accountingMethodArg = z.enum(["Cash", "Accrual"]).optional().describe("Cash or Accrual (defaults to the company setting)");
 const dateMacroArg = z.string().optional().describe("QBO date macro, e.g. \"This Fiscal Year\", \"Last Month\" (alternative to start/end dates)");
 
-server.tool(
+registerTool(
   "get_general_ledger",
   "General Ledger report for a date range — every account's transactions with running balances.",
   {
@@ -704,7 +737,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "get_trial_balance",
   "Trial Balance report for a date range — debit/credit balance of every account.",
   {
@@ -721,7 +754,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "get_transaction_list",
   "Transaction List report — all transactions in a date range, optionally filtered.",
   {
@@ -739,7 +772,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "get_transaction_list_by_vendor",
   "Transaction List grouped by vendor for a date range.",
   {
@@ -757,7 +790,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "get_transaction_list_by_customer",
   "Transaction List grouped by customer for a date range.",
   {
@@ -775,7 +808,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "get_transaction_list_with_splits",
   "Transaction List with split lines (each line of every transaction) for a date range.",
   {
@@ -794,7 +827,7 @@ server.tool(
 
 /* =========================== WRITE TOOLS (8) =========================== */
 
-server.tool(
+registerTool(
   "create_customer",
   "Create a new customer.",
   {
@@ -815,7 +848,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "update_customer",
   "Update an existing customer (fetches current SyncToken first).",
   {
@@ -840,7 +873,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "create_item",
   "Create a product or service item.",
   {
@@ -867,17 +900,19 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "create_invoice",
   "Create an invoice for a customer. line_items is an array of {description, amount}. Optionally email it.",
   {
     customer_ref: z.string().describe("Customer Id or DisplayName"),
     line_items: z.array(z.object({ description: z.string(), amount: z.number() })),
+    txn_date: z.string().optional().describe("YYYY-MM-DD (defaults to today)"),
     due_date: z.string().optional().describe("YYYY-MM-DD"),
+    location: z.string().optional().describe("Location/department name or Id (requires location tracking)"),
     send_email: z.boolean().optional(),
     company: companyArg,
   },
-  tool(async ({ customer_ref, line_items, due_date, send_email, company }) => {
+  tool(async ({ customer_ref, line_items, txn_date, due_date, location, send_email, company }) => {
     const c = await resolveCompany(company, { write: true });
     // Resolve customer by Id (numeric) or by name.
     let customer;
@@ -898,8 +933,11 @@ server.tool(
       SalesItemLineDetail: { ItemRef: { value: item.Id, name: item.Name } },
     }));
 
+    const warnings = await closedPeriodWarnings(c, [txn_date]);
     const payload = { CustomerRef: { value: customer.Id }, Line };
+    if (txn_date) payload.TxnDate = txn_date;
     if (due_date) payload.DueDate = due_date;
+    if (location) payload.DepartmentRef = await departmentRef(location, c);
     if (customer.PrimaryEmailAddr?.Address) {
       payload.BillEmail = { Address: customer.PrimaryEmailAddr.Address };
     }
@@ -914,11 +952,11 @@ server.tool(
       await qboRequest(`/invoice/${invoice.Id}/send?sendTo=${encodeURIComponent(addr)}`, { method: "POST", company: c });
       emailed = true;
     }
-    return asText({ created: invoice, emailed });
+    return asText(withWarnings({ created: invoice, emailed }, warnings));
   })
 );
 
-server.tool(
+registerTool(
   "create_bill",
   "Record a bill (money you owe a vendor), categorized to an expense account.",
   {
@@ -927,10 +965,11 @@ server.tool(
     category: z.string().describe("Expense account name to categorize against"),
     transaction_date: z.string().describe("YYYY-MM-DD"),
     memo: z.string().optional(),
+    location: z.string().optional().describe("Location/department name or Id (requires location tracking)"),
     create_vendor_if_missing: z.boolean().optional().describe("Create the vendor when no exact DisplayName match exists (default false, so a typo cannot mint a phantom vendor)"),
     company: companyArg,
   },
-  tool(async ({ vendor_name, amount, category, transaction_date, memo, create_vendor_if_missing, company }) => {
+  tool(async ({ vendor_name, amount, category, transaction_date, memo, location, create_vendor_if_missing, company }) => {
     const c = await resolveCompany(company, { write: true });
     let vendor = await findVendorByName(vendor_name, c);
     if (!vendor) {
@@ -943,8 +982,9 @@ server.tool(
       vendor = created.Vendor;
     }
     const account = await findAccountByName(category, c);
-    if (!account) throw new Error(`Expense account not found: "${category}". Create it with create_account or check the name.`);
+    if (!account) throw notFoundError("Account", category, await suggestNames("Account", category, c, "Name"));
 
+    const warnings = await closedPeriodWarnings(c, [transaction_date]);
     const payload = {
       VendorRef: { value: vendor.Id },
       TxnDate: transaction_date,
@@ -955,12 +995,13 @@ server.tool(
       }],
     };
     if (memo) payload.PrivateNote = memo;
+    if (location) payload.DepartmentRef = await departmentRef(location, c);
     const r = await qboRequest(`/bill`, { method: "POST", body: payload, company: c });
-    return asText({ created: r.Bill });
+    return asText(withWarnings({ created: r.Bill }, warnings));
   })
 );
 
-server.tool(
+registerTool(
   "create_account",
   "Create a Chart of Accounts entry.",
   {
@@ -980,7 +1021,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "send_invoice_email",
   "Email an existing invoice to the customer (or an override address).",
   { invoice_id: z.string(), email: z.string().optional(), company: companyArg },
@@ -992,83 +1033,87 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "import_transactions_from_csv",
-  "Read a bank-statement CSV, categorize rows against the Chart of Accounts, and import to QBO. Use dry_run first to preview.",
+  "Read a bank-statement CSV, categorize money-out rows against the Chart of Accounts, and import them to QBO as expenses. Sign-aware (credits/deposits are never imported as expenses), idempotent (a re-run skips rows that already posted), and previewable with dry_run.",
   {
     file_path: z.string(),
-    transaction_type: z.enum(["Expense", "Bill", "JournalEntry"]),
+    transaction_type: z.enum(["Expense"]).optional().describe("Only Expense (QBO Purchase) is supported"),
     bank_account_name: z.string(),
+    amount_convention: z.enum(["negative_out", "positive_out"]).optional()
+      .describe("For a single Amount column: which sign is money out (default negative_out). Ignored when separate Debit/Credit columns exist."),
     dry_run: z.boolean().optional(),
     company: companyArg,
   },
-  tool(async ({ file_path, transaction_type, bank_account_name, dry_run, company }) => {
-    // A dry_run only reads/previews, so allow the sole-company convenience for it;
-    // a live import posts transactions and must name a company explicitly.
+  tool(async ({ file_path, bank_account_name, amount_convention, dry_run, company }) => {
+    // A dry_run only reads/previews, so allow the sole-company convenience for
+    // it; a live import posts transactions and must name a company explicitly.
     const c = await resolveCompany(company, { write: !dry_run });
-    const raw = await readFile(file_path.replace(/^~(?=$|\/)/, process.env.HOME), "utf8");
-    const rows = parseCSV(raw);
-    if (rows.length < 2) throw new Error("CSV appears empty or has no data rows.");
-
-    // Detect header columns.
-    const header = rows[0].map((h) => h.trim().toLowerCase());
-    const dateIdx = header.findIndex((h) => h.includes("date"));
-    const descIdx = header.findIndex((h) => h.includes("desc") || h.includes("memo") || h.includes("payee") || h.includes("name"));
-    const amtIdx = header.findIndex((h) => h.includes("amount") || h.includes("debit") || h === "amt");
-    if (dateIdx < 0 || descIdx < 0 || amtIdx < 0) {
-      throw new Error(`Could not detect Date/Description/Amount columns. Found headers: ${rows[0].join(", ")}`);
-    }
+    const fileBytes = await readFile(expandHome(file_path));
+    const plan = planImport(parseCSV(fileBytes.toString("utf8")), { amountConvention: amount_convention });
 
     const bank = await findAccountByName(bank_account_name, c);
-    if (!bank) throw new Error(`Bank account not found: "${bank_account_name}".`);
+    if (!bank) throw notFoundError("Account", bank_account_name, await suggestNames("Account", bank_account_name, c, "Name"));
 
-    const accounts = (await qboQuery(`SELECT * FROM Account WHERE AccountType = 'Expense' MAXRESULTS 200`, { company: c })).Account || [];
+    const { rows: accounts } = await qboQueryAll(`SELECT * FROM Account WHERE AccountType = 'Expense'`, "Account", { company: c });
     const uncategorized = accounts.find((a) => /uncategorized/i.test(a.Name)) || accounts[0];
     if (!uncategorized) throw new Error("No expense accounts exist to categorize into.");
-
     const categorize = (desc) => {
       const d = desc.toLowerCase();
       const match = accounts.find((a) => a.Name && d.includes(a.Name.toLowerCase().split(" ")[0]));
       return match || uncategorized;
     };
 
-    const planned = rows.slice(1)
-      .filter((r) => r.length > Math.max(dateIdx, descIdx, amtIdx))
-      .map((r) => {
-        const desc = (r[descIdx] || "").trim();
-        const amount = Math.abs(parseFloat((r[amtIdx] || "0").replace(/[^0-9.\-]/g, ""))) || 0;
-        const cat = categorize(desc);
-        return { date: (r[dateIdx] || "").trim(), description: desc, amount, category: cat.Name, category_id: cat.Id };
-      })
-      .filter((p) => p.amount > 0);
+    // Stable identity for this exact file + target, and the rows any earlier
+    // (possibly interrupted) run of it already posted.
+    const importIdValue = importId({ company: c, bankAccount: bank.Id, fileBytes });
+    const alreadyPosted = await postedRows(importIdValue);
+    const planned = plan.outflows.map((p) => {
+      const cat = categorize(p.description);
+      return { ...p, category: cat.Name, category_id: cat.Id, already_posted: alreadyPosted.has(p.row) };
+    });
+    const toPost = planned.filter((p) => !p.already_posted);
+
+    const warnings = await closedPeriodWarnings(c, planned.map((p) => p.date));
+    const summary = {
+      company: c || "(default)",
+      import_id: importIdValue,
+      bank_account: bank.Name,
+      rows_out: planned.length,
+      rows_already_posted: planned.length - toPost.length,
+      inflow_rows_skipped: plan.inflows.length,
+      error_rows: plan.errors,
+      total_amount: Number(toPost.reduce((s, p) => s + p.amount, 0).toFixed(2)),
+    };
 
     if (dry_run) {
-      const total = planned.reduce((s, p) => s + p.amount, 0);
-      return asText({
+      return asText(withWarnings({
         dry_run: true,
-        company: c || "(default)",
-        bank_account: bank.Name,
-        transaction_type,
-        row_count: planned.length,
-        total_amount: Number(total.toFixed(2)),
+        ...summary,
         preview: planned,
-        note: "Nothing was posted. Re-run with dry_run: false to import.",
-      });
+        skipped_inflows: plan.inflows,
+        note: "Nothing was posted. Re-run with dry_run: false to import the money-out rows.",
+      }, warnings));
     }
 
-    if (transaction_type !== "Expense") {
-      throw new Error(`Only transaction_type "Expense" is wired for live posting in this build. Use dry_run to preview ${transaction_type} rows.`);
+    if (plan.errors.length) {
+      throw new Error(
+        `Cannot import: ${plan.errors.length} row(s) are unreadable (run dry_run to inspect): ` +
+        plan.errors.slice(0, 3).map((e) => `row ${e.row}: ${e.reason}`).join("; ")
+      );
+    }
+    if (!toPost.length) {
+      return asText(withWarnings({ imported: 0, ...summary, note: "Every money-out row in this file already posted (idempotent re-run)." }, warnings));
     }
 
-    // Post as a QBO batch of Purchase (Expense) transactions from the bank account.
-    const items = planned.map((p, i) => ({
+    const items = toPost.map((p, i) => ({
       bId: `bid${i}`,
       operation: "create",
       Purchase: {
         PaymentType: "Check",
         AccountRef: { value: bank.Id, name: bank.Name },
-        TxnDate: p.date || todayISO(),
-        PrivateNote: p.description,
+        TxnDate: p.date,
+        PrivateNote: `${p.description} ${rowMarker(importIdValue, p.row)}`.trim(),
         Line: [{
           Amount: p.amount,
           DetailType: "AccountBasedExpenseLineDetail",
@@ -1078,21 +1123,32 @@ server.tool(
     }));
 
     const results = [];
-    // QBO batch caps at 30 items per request.
+    // QBO batch caps at 30 items per request. After each chunk, journal what
+    // posted so a mid-run failure can resume without double-posting.
     for (let i = 0; i < items.length; i += 30) {
       const chunk = items.slice(i, i + 30);
       const r = await qboRequest(`/batch`, { method: "POST", body: { BatchItemRequest: chunk }, company: c });
-      results.push(...(r.BatchItemResponse || []));
+      const responses = r.BatchItemResponse || [];
+      results.push(...responses);
+      const postedNow = responses
+        .map((res) => {
+          if (!res.Purchase) return null;
+          const idx = Number(String(res.bId).replace("bid", ""));
+          const src = toPost[idx];
+          return src ? { row: src.row, purchase_id: res.Purchase.Id, amount: src.amount, date: src.date } : null;
+        })
+        .filter(Boolean);
+      await recordPosted(importIdValue, postedNow);
     }
     const posted = results.filter((r) => r.Purchase).length;
     const errors = results.filter((r) => r.Fault).map((r) => r.Fault?.Error?.[0]?.Message);
-    return asText({ imported: posted, errors, total_rows: planned.length });
+    return asText(withWarnings({ imported: posted, errors, ...summary }, warnings));
   })
 );
 
 /* =========================== JOURNAL ENTRY TOOLS (6) =========================== */
 
-server.tool(
+registerTool(
   "create_journal_entry",
   "Create a journal entry from balanced lines (total Debits must equal total Credits). Each line posts an amount to an account as a Debit or Credit; lines may optionally be tagged to a customer/vendor/employee.",
   {
@@ -1105,17 +1161,18 @@ server.tool(
   },
   tool(async ({ lines, txn_date, doc_number, memo, adjustment, company }) => {
     const c = await resolveCompany(company, { write: true });
+    const warnings = await closedPeriodWarnings(c, [txn_date]);
     const payload = { Line: await buildJournalLines(lines, c) };
     if (txn_date) payload.TxnDate = txn_date;
     if (doc_number) payload.DocNumber = doc_number;
     if (memo) payload.PrivateNote = memo;
     if (adjustment != null) payload.Adjustment = adjustment;
     const r = await qboRequest(`/journalentry`, { method: "POST", body: payload, company: c });
-    return asText({ created: r.JournalEntry });
+    return asText(withWarnings({ created: r.JournalEntry }, warnings));
   })
 );
 
-server.tool(
+registerTool(
   "update_journal_entry",
   "Full update of a journal entry: REPLACES all lines with the ones you provide (must stay balanced). Omitted header fields are carried over from the current entry. Fetches SyncToken automatically.",
   {
@@ -1130,6 +1187,7 @@ server.tool(
   tool(async ({ journal_entry_id, lines, txn_date, doc_number, memo, adjustment, company }) => {
     const c = await resolveCompany(company, { write: true });
     const current = await readJournalEntry(journal_entry_id, c);
+    const warnings = await closedPeriodWarnings(c, [txn_date ?? current.TxnDate]);
     const payload = {
       Id: current.Id,
       SyncToken: current.SyncToken,
@@ -1143,13 +1201,13 @@ server.tool(
     if (note != null) payload.PrivateNote = note;
     if (adj != null) payload.Adjustment = adj;
     const r = await qboRequest(`/journalentry`, { method: "POST", body: payload, company: c });
-    return asText({ updated: r.JournalEntry });
+    return asText(withWarnings({ updated: r.JournalEntry }, warnings));
   })
 );
 
 /* =========================== SALES TRANSACTIONS =========================== */
 
-server.tool(
+registerTool(
   "create_estimate",
   "Create an estimate (quote) for a customer, with line items.",
   {
@@ -1159,11 +1217,13 @@ server.tool(
     expiration_date: z.string().optional().describe("YYYY-MM-DD"),
     email: z.string().optional().describe("BillEmail address"),
     memo: z.string().optional(),
+    location: z.string().optional().describe("Location/department name or Id (requires location tracking)"),
     company: companyArg,
   },
-  tool(async ({ customer_ref, line_items, txn_date, expiration_date, email, memo, company }) => {
+  tool(async ({ customer_ref, line_items, txn_date, expiration_date, email, memo, location, company }) => {
     const c = await resolveCompany(company, { write: true });
     const payload = { CustomerRef: await resolveRef("Customer", customer_ref, c, "DisplayName"), Line: await buildSalesLines(line_items, c) };
+    if (location) payload.DepartmentRef = await departmentRef(location, c);
     if (txn_date) payload.TxnDate = txn_date;
     if (expiration_date) payload.ExpirationDate = expiration_date;
     if (email) payload.BillEmail = { Address: email };
@@ -1173,7 +1233,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "update_estimate",
   "Sparse-update an estimate (fetches SyncToken first). Pass line_items only to replace all lines.",
   {
@@ -1197,7 +1257,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "send_estimate",
   "Email an existing estimate to the customer (or an override address).",
   { estimate_id: z.string(), email: z.string().optional(), company: companyArg },
@@ -1209,7 +1269,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "update_invoice",
   "Sparse-update an invoice (fetches SyncToken first). Pass line_items only to replace all lines.",
   {
@@ -1235,7 +1295,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "void_invoice",
   "Void an existing invoice (zeros it out but keeps the number). Fetches SyncToken first.",
   { invoice_id: z.string(), company: companyArg },
@@ -1247,7 +1307,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "create_sales_receipt",
   "Create a sales receipt (paid-at-point-of-sale sale) with line items.",
   {
@@ -1257,22 +1317,25 @@ server.tool(
     txn_date: z.string().optional(),
     email: z.string().optional(),
     memo: z.string().optional(),
+    location: z.string().optional().describe("Location/department name or Id (requires location tracking)"),
     company: companyArg,
   },
-  tool(async ({ customer_ref, line_items, deposit_to_account, txn_date, email, memo, company }) => {
+  tool(async ({ customer_ref, line_items, deposit_to_account, txn_date, email, memo, location, company }) => {
     const c = await resolveCompany(company, { write: true });
+    const warnings = await closedPeriodWarnings(c, [txn_date]);
     const payload = { Line: await buildSalesLines(line_items, c) };
     if (customer_ref) payload.CustomerRef = await resolveRef("Customer", customer_ref, c, "DisplayName");
     if (deposit_to_account) payload.DepositToAccountRef = await resolveRef("Account", deposit_to_account, c, "Name");
     if (txn_date) payload.TxnDate = txn_date;
     if (email) payload.BillEmail = { Address: email };
     if (memo) payload.CustomerMemo = { value: memo };
+    if (location) payload.DepartmentRef = await departmentRef(location, c);
     const r = await qboRequest(`/salesreceipt`, { method: "POST", body: payload, company: c });
-    return asText({ created: r.SalesReceipt });
+    return asText(withWarnings({ created: r.SalesReceipt }, warnings));
   })
 );
 
-server.tool(
+registerTool(
   "update_sales_receipt",
   "Sparse-update a sales receipt (fetches SyncToken first). Pass line_items only to replace all lines.",
   {
@@ -1296,7 +1359,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "send_sales_receipt",
   "Email an existing sales receipt to the customer (or an override address).",
   { sales_receipt_id: z.string(), email: z.string().optional(), company: companyArg },
@@ -1308,7 +1371,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "create_credit_memo",
   "Create a credit memo for a customer, with line items.",
   {
@@ -1320,15 +1383,16 @@ server.tool(
   },
   tool(async ({ customer_ref, line_items, txn_date, memo, company }) => {
     const c = await resolveCompany(company, { write: true });
+    const warnings = await closedPeriodWarnings(c, [txn_date]);
     const payload = { CustomerRef: await resolveRef("Customer", customer_ref, c, "DisplayName"), Line: await buildSalesLines(line_items, c) };
     if (txn_date) payload.TxnDate = txn_date;
     if (memo) payload.CustomerMemo = { value: memo };
     const r = await qboRequest(`/creditmemo`, { method: "POST", body: payload, company: c });
-    return asText({ created: r.CreditMemo });
+    return asText(withWarnings({ created: r.CreditMemo }, warnings));
   })
 );
 
-server.tool(
+registerTool(
   "create_refund_receipt",
   "Create a refund receipt (money returned to a customer), with line items.",
   {
@@ -1341,16 +1405,17 @@ server.tool(
   },
   tool(async ({ customer_ref, line_items, deposit_to_account, txn_date, memo, company }) => {
     const c = await resolveCompany(company, { write: true });
+    const warnings = await closedPeriodWarnings(c, [txn_date]);
     const payload = { CustomerRef: await resolveRef("Customer", customer_ref, c, "DisplayName"), Line: await buildSalesLines(line_items, c) };
     if (deposit_to_account) payload.DepositToAccountRef = await resolveRef("Account", deposit_to_account, c, "Name");
     if (txn_date) payload.TxnDate = txn_date;
     if (memo) payload.CustomerMemo = { value: memo };
     const r = await qboRequest(`/refundreceipt`, { method: "POST", body: payload, company: c });
-    return asText({ created: r.RefundReceipt });
+    return asText(withWarnings({ created: r.RefundReceipt }, warnings));
   })
 );
 
-server.tool(
+registerTool(
   "create_payment",
   "Record a customer payment, optionally applied to a specific invoice.",
   {
@@ -1363,18 +1428,19 @@ server.tool(
   },
   tool(async ({ customer_ref, amount, invoice_id, txn_date, memo, company }) => {
     const c = await resolveCompany(company, { write: true });
+    const warnings = await closedPeriodWarnings(c, [txn_date]);
     const payload = { CustomerRef: await resolveRef("Customer", customer_ref, c, "DisplayName"), TotalAmt: amount };
     if (invoice_id) {
-      payload.Line = [{ Amount: amount, LinkedTxn: [{ TxnId: String(invoice_id), TxnType: "Invoice" }] }];
+      payload.Line = [{ Amount: amount, LinkedTxn: [{ TxnId: assertId(invoice_id, "invoice_id"), TxnType: "Invoice" }] }];
     }
     if (txn_date) payload.TxnDate = txn_date;
     if (memo) payload.PrivateNote = memo;
     const r = await qboRequest(`/payment`, { method: "POST", body: payload, company: c });
-    return asText({ created: r.Payment });
+    return asText(withWarnings({ created: r.Payment }, warnings));
   })
 );
 
-server.tool(
+registerTool(
   "create_deposit",
   "Create a bank deposit into an account, with one or more source lines.",
   {
@@ -1386,6 +1452,7 @@ server.tool(
   },
   tool(async ({ deposit_to_account, lines, txn_date, memo, company }) => {
     const c = await resolveCompany(company, { write: true });
+    const warnings = await closedPeriodWarnings(c, [txn_date]);
     const payload = {
       DepositToAccountRef: await resolveRef("Account", deposit_to_account, c, "Name"),
       Line: await buildDepositLines(lines, c),
@@ -1393,13 +1460,13 @@ server.tool(
     if (txn_date) payload.TxnDate = txn_date;
     if (memo) payload.PrivateNote = memo;
     const r = await qboRequest(`/deposit`, { method: "POST", body: payload, company: c });
-    return asText({ created: r.Deposit });
+    return asText(withWarnings({ created: r.Deposit }, warnings));
   })
 );
 
 /* =========================== PURCHASES / VENDORS =========================== */
 
-server.tool(
+registerTool(
   "create_expense",
   "Record an expense (Purchase) paid by cash, check, or credit card, categorized to expense accounts.",
   {
@@ -1410,15 +1477,18 @@ server.tool(
     payee_type: z.enum(["Vendor", "Customer", "Employee"]).optional(),
     txn_date: z.string().optional(),
     memo: z.string().optional(),
+    location: z.string().optional().describe("Location/department name or Id (requires location tracking)"),
     company: companyArg,
   },
-  tool(async ({ payment_account, payment_type, lines, payee_name, payee_type, txn_date, memo, company }) => {
+  tool(async ({ payment_account, payment_type, lines, payee_name, payee_type, txn_date, memo, location, company }) => {
     const c = await resolveCompany(company, { write: true });
+    const warnings = await closedPeriodWarnings(c, [txn_date]);
     const payload = {
       PaymentType: payment_type,
       AccountRef: await resolveRef("Account", payment_account, c, "Name"),
       Line: await buildAccountLines(lines, c),
     };
+    if (location) payload.DepartmentRef = await departmentRef(location, c);
     if (payee_name) {
       if (!payee_type) throw new Error("payee_type is required when payee_name is set.");
       payload.EntityRef = await resolveRef(payee_type, payee_name, c, "DisplayName");
@@ -1426,11 +1496,11 @@ server.tool(
     if (txn_date) payload.TxnDate = txn_date;
     if (memo) payload.PrivateNote = memo;
     const r = await qboRequest(`/purchase`, { method: "POST", body: payload, company: c });
-    return asText({ created: r.Purchase });
+    return asText(withWarnings({ created: r.Purchase }, warnings));
   })
 );
 
-server.tool(
+registerTool(
   "update_purchase",
   "Sparse-update a purchase/expense (fetches SyncToken first). Pass lines only to replace all lines.",
   {
@@ -1443,16 +1513,17 @@ server.tool(
   tool(async ({ purchase_id, lines, txn_date, memo, company }) => {
     const c = await resolveCompany(company, { write: true });
     const current = await fetchEntity("Purchase", purchase_id, c);
+    const warnings = txn_date ? await closedPeriodWarnings(c, [txn_date]) : [];
     const payload = { Id: current.Id, SyncToken: current.SyncToken, sparse: true, PaymentType: current.PaymentType, AccountRef: current.AccountRef };
     if (lines) payload.Line = await buildAccountLines(lines, c);
     if (txn_date != null) payload.TxnDate = txn_date;
     if (memo != null) payload.PrivateNote = memo;
     const r = await qboRequest(`/purchase`, { method: "POST", body: payload, company: c });
-    return asText({ updated: r.Purchase });
+    return asText(withWarnings({ updated: r.Purchase }, warnings));
   })
 );
 
-server.tool(
+registerTool(
   "create_bill_item_based",
   "Record a bill against product/service items (item-based lines), owed to a vendor.",
   {
@@ -1460,19 +1531,22 @@ server.tool(
     line_items: z.array(itemLineSchema),
     transaction_date: z.string().optional().describe("YYYY-MM-DD"),
     memo: z.string().optional(),
+    location: z.string().optional().describe("Location/department name or Id (requires location tracking)"),
     company: companyArg,
   },
-  tool(async ({ vendor_name, line_items, transaction_date, memo, company }) => {
+  tool(async ({ vendor_name, line_items, transaction_date, memo, location, company }) => {
     const c = await resolveCompany(company, { write: true });
+    const warnings = await closedPeriodWarnings(c, [transaction_date]);
     const payload = { VendorRef: await resolveRef("Vendor", vendor_name, c, "DisplayName"), Line: await buildItemExpenseLines(line_items, c) };
     if (transaction_date) payload.TxnDate = transaction_date;
     if (memo) payload.PrivateNote = memo;
+    if (location) payload.DepartmentRef = await departmentRef(location, c);
     const r = await qboRequest(`/bill`, { method: "POST", body: payload, company: c });
-    return asText({ created: r.Bill });
+    return asText(withWarnings({ created: r.Bill }, warnings));
   })
 );
 
-server.tool(
+registerTool(
   "update_bill",
   "Sparse-update a bill (fetches SyncToken first). Pass account_lines only to replace all lines.",
   {
@@ -1485,17 +1559,18 @@ server.tool(
   tool(async ({ bill_id, account_lines, txn_date, memo, company }) => {
     const c = await resolveCompany(company, { write: true });
     const current = await fetchEntity("Bill", bill_id, c);
+    const warnings = txn_date ? await closedPeriodWarnings(c, [txn_date]) : [];
     // VendorRef is required even on a sparse Bill update — carry it forward.
     const payload = { Id: current.Id, SyncToken: current.SyncToken, sparse: true, VendorRef: current.VendorRef };
     if (account_lines) payload.Line = await buildAccountLines(account_lines, c);
     if (txn_date != null) payload.TxnDate = txn_date;
     if (memo != null) payload.PrivateNote = memo;
     const r = await qboRequest(`/bill`, { method: "POST", body: payload, company: c });
-    return asText({ updated: r.Bill });
+    return asText(withWarnings({ updated: r.Bill }, warnings));
   })
 );
 
-server.tool(
+registerTool(
   "create_vendor_credit",
   "Record a vendor credit (money a vendor owes you), categorized to expense accounts.",
   {
@@ -1507,15 +1582,16 @@ server.tool(
   },
   tool(async ({ vendor_name, lines, txn_date, memo, company }) => {
     const c = await resolveCompany(company, { write: true });
+    const warnings = await closedPeriodWarnings(c, [txn_date]);
     const payload = { VendorRef: await resolveRef("Vendor", vendor_name, c, "DisplayName"), Line: await buildAccountLines(lines, c) };
     if (txn_date) payload.TxnDate = txn_date;
     if (memo) payload.PrivateNote = memo;
     const r = await qboRequest(`/vendorcredit`, { method: "POST", body: payload, company: c });
-    return asText({ created: r.VendorCredit });
+    return asText(withWarnings({ created: r.VendorCredit }, warnings));
   })
 );
 
-server.tool(
+registerTool(
   "create_purchase_order",
   "Create a purchase order to a vendor, with item-based lines.",
   {
@@ -1538,7 +1614,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "create_vendor",
   "Create a new vendor.",
   {
@@ -1559,7 +1635,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "update_vendor",
   "Sparse-update an existing vendor (fetches SyncToken first).",
   {
@@ -1587,7 +1663,7 @@ server.tool(
 
 /* =========================== PEOPLE / ITEMS =========================== */
 
-server.tool(
+registerTool(
   "create_employee",
   "Create a new employee.",
   {
@@ -1612,7 +1688,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "create_time_activity",
   "Log a single time activity for an employee or vendor.",
   {
@@ -1637,7 +1713,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "update_item",
   "Sparse-update a product/service item (fetches SyncToken first).",
   {
@@ -1661,9 +1737,732 @@ server.tool(
   })
 );
 
+/* =========================== SEARCH & LISTS (7) =========================== */
+
+const verboseArg = z.boolean().optional().describe("Return full QBO entities instead of compact rows");
+
+// Typed, allowlisted advanced filters (see entities.js buildWhere).
+const filterValue = z.union([z.string(), z.number(), z.boolean(), z.array(z.union([z.string(), z.number()]))]);
+const filtersArg = (fields) =>
+  z.array(z.object({
+    field: z.enum(fields),
+    value: filterValue,
+    operator: z.enum(["=", "<", ">", "<=", ">=", "LIKE", "IN"]).optional().describe("Default ="),
+  })).optional().describe("Advanced filters, ANDed with the other arguments");
+
+const BILL_FILTER_FIELDS = ["DocNumber", "TxnDate", "DueDate", "VendorRef", "Balance", "TotalAmt", "Id", "MetaData.LastUpdatedTime"];
+const PAYMENT_FILTER_FIELDS = ["TxnDate", "CustomerRef", "TotalAmt", "Id", "MetaData.LastUpdatedTime"];
+const ESTIMATE_FILTER_FIELDS = ["DocNumber", "TxnDate", "CustomerRef", "TotalAmt", "TxnStatus", "Id", "MetaData.LastUpdatedTime"];
+
+function nameSearchTool(toolName, entity, plural, nameField, extraDesc = "", filterFields = [nameField, "Active", "Id", "MetaData.LastUpdatedTime"]) {
+  registerTool(
+    toolName,
+    `Search ${plural} by name fragment (case-insensitive), with compact results and optional typed filters.${extraDesc}`,
+    {
+      term: z.string().optional().describe("Name fragment; omit to list all"),
+      include_inactive: z.boolean().optional(),
+      filters: filtersArg(filterFields),
+      order_by: z.enum(filterFields).optional().describe("Sort field (defaults to the name)"),
+      descending: z.boolean().optional(),
+      verbose: verboseArg,
+      company: companyArg,
+    },
+    tool(async ({ term, include_inactive, filters, order_by, descending, verbose, company }) => {
+      const c = await resolveCompany(company);
+      const where = [];
+      if (term) where.push(`${nameField} LIKE '%${esc(term)}%'`);
+      if (include_inactive) where.push(`Active IN (true, false)`);
+      if (filters?.length) where.push(...buildWhere(filters, filterFields));
+      const sql = `SELECT * FROM ${entity}${where.length ? " WHERE " + where.join(" AND ") : ""} ORDERBY ${order_by || nameField}${descending ? " DESC" : ""}`;
+      const { rows, truncated } = await qboQueryAll(sql, entity, { company: c });
+      return asText({ count: rows.length, truncated, [plural]: compactList(entity, rows, verbose) });
+    })
+  );
+}
+
+nameSearchTool("search_customers", "Customer", "customers", "DisplayName", "",
+  ["DisplayName", "CompanyName", "GivenName", "FamilyName", "Active", "Balance", "Id", "MetaData.LastUpdatedTime"]);
+nameSearchTool("search_vendors", "Vendor", "vendors", "DisplayName", "",
+  ["DisplayName", "CompanyName", "Active", "Balance", "Id", "MetaData.LastUpdatedTime"]);
+nameSearchTool("search_items", "Item", "items", "Name", "",
+  ["Name", "Type", "Active", "Id", "MetaData.LastUpdatedTime"]);
+nameSearchTool("search_accounts", "Account", "accounts", "Name", " Includes account type and current balance.",
+  ["Name", "AccountType", "AccountSubType", "Active", "Id", "MetaData.LastUpdatedTime"]);
+nameSearchTool("search_terms", "Term", "terms", "Name", " Payment terms (Net 30 etc.).");
+nameSearchTool("search_payment_methods", "PaymentMethod", "payment_methods", "Name");
+nameSearchTool("search_tax_codes", "TaxCode", "tax_codes", "Name");
+
+registerTool(
+  "get_bills",
+  "List bills, optionally filtered by vendor, unpaid status, and date range.",
+  {
+    vendor: z.string().optional().describe("Vendor name or Id"),
+    unpaid_only: z.boolean().optional(),
+    start_date: z.string().optional().describe("YYYY-MM-DD"),
+    end_date: z.string().optional().describe("YYYY-MM-DD"),
+    filters: filtersArg(BILL_FILTER_FIELDS),
+    verbose: verboseArg,
+    company: companyArg,
+  },
+  tool(async ({ vendor, unpaid_only, start_date, end_date, filters, verbose, company }) => {
+    const c = await resolveCompany(company);
+    const where = [];
+    if (vendor) where.push(`VendorRef = '${(await resolveRef("Vendor", vendor, c)).value}'`);
+    if (unpaid_only) where.push(`Balance > '0'`);
+    if (start_date) where.push(`TxnDate >= '${esc(start_date)}'`);
+    if (end_date) where.push(`TxnDate <= '${esc(end_date)}'`);
+    if (filters?.length) where.push(...buildWhere(filters, BILL_FILTER_FIELDS));
+    const sql = `SELECT * FROM Bill${where.length ? " WHERE " + where.join(" AND ") : ""} ORDERBY TxnDate DESC`;
+    const { rows, truncated } = await qboQueryAll(sql, "Bill", { company: c });
+    return asText({ count: rows.length, truncated, bills: compactList("Bill", rows, verbose) });
+  })
+);
+
+registerTool(
+  "get_payments",
+  "List customer payments received, optionally filtered by customer and date range.",
+  {
+    customer: z.string().optional().describe("Customer name or Id"),
+    start_date: z.string().optional().describe("YYYY-MM-DD"),
+    end_date: z.string().optional().describe("YYYY-MM-DD"),
+    filters: filtersArg(PAYMENT_FILTER_FIELDS),
+    verbose: verboseArg,
+    company: companyArg,
+  },
+  tool(async ({ customer, start_date, end_date, filters, verbose, company }) => {
+    const c = await resolveCompany(company);
+    const where = [];
+    if (customer) where.push(`CustomerRef = '${(await resolveRef("Customer", customer, c)).value}'`);
+    if (start_date) where.push(`TxnDate >= '${esc(start_date)}'`);
+    if (end_date) where.push(`TxnDate <= '${esc(end_date)}'`);
+    if (filters?.length) where.push(...buildWhere(filters, PAYMENT_FILTER_FIELDS));
+    const sql = `SELECT * FROM Payment${where.length ? " WHERE " + where.join(" AND ") : ""} ORDERBY TxnDate DESC`;
+    const { rows, truncated } = await qboQueryAll(sql, "Payment", { company: c });
+    return asText({ count: rows.length, truncated, payments: compactList("Payment", rows, verbose) });
+  })
+);
+
+registerTool(
+  "get_estimates",
+  "List estimates (quotes), optionally filtered by customer and date range.",
+  {
+    customer: z.string().optional().describe("Customer name or Id"),
+    start_date: z.string().optional().describe("YYYY-MM-DD"),
+    end_date: z.string().optional().describe("YYYY-MM-DD"),
+    filters: filtersArg(ESTIMATE_FILTER_FIELDS),
+    verbose: verboseArg,
+    company: companyArg,
+  },
+  tool(async ({ customer, start_date, end_date, filters, verbose, company }) => {
+    const c = await resolveCompany(company);
+    const where = [];
+    if (customer) where.push(`CustomerRef = '${(await resolveRef("Customer", customer, c)).value}'`);
+    if (start_date) where.push(`TxnDate >= '${esc(start_date)}'`);
+    if (end_date) where.push(`TxnDate <= '${esc(end_date)}'`);
+    if (filters?.length) where.push(...buildWhere(filters, ESTIMATE_FILTER_FIELDS));
+    const sql = `SELECT * FROM Estimate${where.length ? " WHERE " + where.join(" AND ") : ""} ORDERBY TxnDate DESC`;
+    const { rows, truncated } = await qboQueryAll(sql, "Estimate", { company: c });
+    return asText({ count: rows.length, truncated, estimates: compactList("Estimate", rows, verbose) });
+  })
+);
+
+/* ====================== AP PAYMENTS & TRANSFERS (3) ====================== */
+
+registerTool(
+  "create_bill_payment",
+  "Pay one or more bills (or record an unapplied vendor payment) by check or credit card. Completes the AP cycle: create_bill enters the liability, this pays it.",
+  {
+    vendor_name: z.string().describe("Vendor name or Id"),
+    amount: z.number().positive(),
+    payment_account: z.string().describe("Bank account (Check) or credit card account (CreditCard), name or Id"),
+    payment_type: z.enum(["Check", "CreditCard"]),
+    bill_ids: z.array(z.string()).optional().describe("Bill Ids to apply the payment to, in order; the amount is allocated across their open balances"),
+    txn_date: z.string().optional().describe("YYYY-MM-DD"),
+    memo: z.string().optional(),
+    company: companyArg,
+  },
+  tool(async ({ vendor_name, amount, payment_account, payment_type, bill_ids, txn_date, memo, company }) => {
+    const c = await resolveCompany(company, { write: true });
+    const warnings = await closedPeriodWarnings(c, [txn_date]);
+    const payload = {
+      VendorRef: await resolveRef("Vendor", vendor_name, c),
+      TotalAmt: amount,
+      PayType: payment_type,
+    };
+    const acctRef = await resolveRef("Account", payment_account, c, "Name");
+    if (payment_type === "Check") payload.CheckPayment = { BankAccountRef: acctRef };
+    else payload.CreditCardPayment = { CCAccountRef: acctRef };
+
+    if (bill_ids?.length) {
+      let remaining = amount;
+      const lines = [];
+      for (const id of bill_ids) {
+        const bill = await fetchEntity("Bill", id, c);
+        const open = Number(bill.Balance || 0);
+        const applied = Math.min(remaining, open);
+        if (applied > 0) {
+          lines.push({ Amount: Number(applied.toFixed(2)), LinkedTxn: [{ TxnId: bill.Id, TxnType: "Bill" }] });
+          remaining = Number((remaining - applied).toFixed(2));
+        }
+      }
+      if (remaining > 0.005) {
+        throw new Error(`Payment of ${amount} exceeds the open balance of the listed bills by ${remaining.toFixed(2)}. Lower the amount or add more bills.`);
+      }
+      payload.Line = lines;
+    }
+    if (txn_date) payload.TxnDate = txn_date;
+    if (memo) payload.PrivateNote = memo;
+    const r = await qboRequest(`/billpayment`, { method: "POST", body: payload, company: c });
+    return asText(withWarnings({ created: r.BillPayment }, warnings));
+  })
+);
+
+registerTool(
+  "get_bill_payments",
+  "List bill payments, optionally filtered by vendor and date range.",
+  {
+    vendor: z.string().optional().describe("Vendor name or Id"),
+    start_date: z.string().optional().describe("YYYY-MM-DD"),
+    end_date: z.string().optional().describe("YYYY-MM-DD"),
+    verbose: verboseArg,
+    company: companyArg,
+  },
+  tool(async ({ vendor, start_date, end_date, verbose, company }) => {
+    const c = await resolveCompany(company);
+    const where = [];
+    if (vendor) where.push(`VendorRef = '${(await resolveRef("Vendor", vendor, c)).value}'`);
+    if (start_date) where.push(`TxnDate >= '${esc(start_date)}'`);
+    if (end_date) where.push(`TxnDate <= '${esc(end_date)}'`);
+    const sql = `SELECT * FROM BillPayment${where.length ? " WHERE " + where.join(" AND ") : ""} ORDERBY TxnDate DESC`;
+    const { rows, truncated } = await qboQueryAll(sql, "BillPayment", { company: c });
+    return asText({ count: rows.length, truncated, bill_payments: compactList("BillPayment", rows, verbose) });
+  })
+);
+
+registerTool(
+  "create_transfer",
+  "Move money between two balance-sheet accounts (e.g. checking to savings).",
+  {
+    from_account: z.string().describe("Source account name or Id"),
+    to_account: z.string().describe("Destination account name or Id"),
+    amount: z.number().positive(),
+    txn_date: z.string().optional().describe("YYYY-MM-DD"),
+    memo: z.string().optional(),
+    company: companyArg,
+  },
+  tool(async ({ from_account, to_account, amount, txn_date, memo, company }) => {
+    const c = await resolveCompany(company, { write: true });
+    const warnings = await closedPeriodWarnings(c, [txn_date]);
+    const payload = {
+      FromAccountRef: await resolveRef("Account", from_account, c, "Name"),
+      ToAccountRef: await resolveRef("Account", to_account, c, "Name"),
+      Amount: amount,
+    };
+    if (txn_date) payload.TxnDate = txn_date;
+    if (memo) payload.PrivateNote = memo;
+    const r = await qboRequest(`/transfer`, { method: "POST", body: payload, company: c });
+    return asText(withWarnings({ created: r.Transfer }, warnings));
+  })
+);
+
+/* =========================== CHANGE TRACKING (1) ========================== */
+
+registerTool(
+  "get_changes_since",
+  "Change Data Capture: everything that changed (created/updated/deleted) for the given entity types since a timestamp. QBO keeps roughly 30 days of change history. Ideal for \"what changed in this file this week\".",
+  {
+    entities: z.string().describe("Comma-separated entity names, e.g. \"Invoice,Bill,Customer,JournalEntry\""),
+    changed_since: z.string().describe("ISO date or datetime, e.g. 2026-07-01 or 2026-07-01T00:00:00Z (must be within ~30 days)"),
+    company: companyArg,
+  },
+  tool(async ({ entities, changed_since, company }) => {
+    const c = await resolveCompany(company);
+    const list = entities.split(",").map((s) => s.trim()).filter(Boolean);
+    if (!list.length || list.some((e) => !/^[A-Za-z]+$/.test(e))) {
+      throw new Error(`entities must be comma-separated QBO entity names, got "${entities}".`);
+    }
+    const sinceMs = Date.parse(changed_since);
+    if (Number.isNaN(sinceMs)) throw new Error(`changed_since is not a valid date: "${changed_since}"`);
+    if (Date.now() - sinceMs > 31 * 86_400_000) {
+      throw new Error("changed_since is more than ~30 days back; QBO's change data capture only covers about 30 days.");
+    }
+    const q = `entities=${encodeURIComponent(list.join(","))}&changedSince=${encodeURIComponent(changed_since)}`;
+    return asText(await qboRequest(`/cdc?${q}`, { company: c }));
+  })
+);
+
+/* ===================== FLEET (MULTI-COMPANY) TOOLS (3) ==================== */
+
+// Run one report across several companies and merge the rows side by side.
+async function consolidatedReport(reportName, targetCompanies, params) {
+  const known = await listCompanies();
+  const slugs = targetCompanies?.length
+    ? targetCompanies.map((s) => sanitizeSlug(s))
+    : known.map((k) => k.slug);
+  if (!slugs.length) throw new Error("No companies connected.");
+  const byCompany = [];
+  const errors = [];
+  for (const slug of slugs) {
+    if (!known.some((k) => k.slug === slug)) {
+      errors.push({ company: slug, error: "not connected (see list_companies)" });
+      continue;
+    }
+    try {
+      const rep = await qboRequest(`/reports/${reportName}${reportQuery(params)}`, { company: slug });
+      byCompany.push({ company: slug, flat: flattenReport(rep) });
+    } catch (e) {
+      errors.push({ company: slug, error: e.message });
+    }
+  }
+  if (!byCompany.length) {
+    throw new Error(`No reports could be fetched. ${errors.map((e) => `${e.company}: ${e.error}`).join("; ")}`);
+  }
+  const consolidated = consolidateReports(byCompany);
+  return errors.length ? { ...consolidated, errors } : consolidated;
+}
+
+registerTool(
+  "get_consolidated_profit_and_loss",
+  "Profit & Loss across several companies at once: one table, a column per company, plus a combined total. Rows are merged by account name; summary rows (Total Income, Net Income) are included with is_summary: true.",
+  {
+    start_date: z.string().describe("YYYY-MM-DD"),
+    end_date: z.string().describe("YYYY-MM-DD"),
+    accounting_method: accountingMethodArg,
+    companies: z.array(z.string()).optional().describe("Company slugs to include (default: every connected company)"),
+  },
+  tool(async ({ start_date, end_date, accounting_method, companies }) => {
+    return asText(await consolidatedReport("ProfitAndLoss", companies, { start_date, end_date, accounting_method }));
+  })
+);
+
+registerTool(
+  "get_consolidated_balance_sheet",
+  "Balance Sheet across several companies at once: one table, a column per company, plus a combined total.",
+  {
+    start_date: z.string().optional().describe("YYYY-MM-DD"),
+    end_date: z.string().describe("YYYY-MM-DD (the as-of date)"),
+    accounting_method: accountingMethodArg,
+    companies: z.array(z.string()).optional().describe("Company slugs to include (default: every connected company)"),
+  },
+  tool(async ({ start_date, end_date, accounting_method, companies }) => {
+    return asText(await consolidatedReport("BalanceSheet", companies, { start_date, end_date, accounting_method }));
+  })
+);
+
+registerTool(
+  "create_journal_entry_multi",
+  "Post the same journal entry to several companies in one call (e.g. a monthly management fee across client files). Companies must be listed explicitly; account/entity names are resolved per company. Returns a per-company result, so one failure never blocks the rest.",
+  {
+    companies: z.array(z.string()).min(1).describe("Explicit company slugs to post to (never inferred)"),
+    lines: z.array(journalLineSchema).describe("At least two lines; debits must equal credits"),
+    txn_date: z.string().optional().describe("YYYY-MM-DD (defaults to today)"),
+    doc_number: z.string().optional(),
+    memo: z.string().optional(),
+    adjustment: z.boolean().optional(),
+  },
+  tool(async ({ companies: targets, lines, txn_date, doc_number, memo, adjustment }) => {
+    const known = await listCompanies();
+    const results = [];
+    for (const raw of targets) {
+      const slug = sanitizeSlug(raw);
+      const entry = { company: slug };
+      try {
+        if (!known.some((k) => k.slug === slug)) {
+          throw new Error(`No such company "${raw}". Available: ${formatCompanyList(known)}.`);
+        }
+        await checkWritePolicy(slug, null);
+        const warnings = await closedPeriodWarnings(slug, [txn_date]);
+        const payload = { Line: await buildJournalLines(lines, slug) };
+        if (txn_date) payload.TxnDate = txn_date;
+        if (doc_number) payload.DocNumber = doc_number;
+        if (memo) payload.PrivateNote = memo;
+        if (adjustment != null) payload.Adjustment = adjustment;
+        const r = await qboRequest(`/journalentry`, { method: "POST", body: payload, company: slug });
+        entry.status = "ok";
+        entry.journal_entry_id = r.JournalEntry?.Id;
+        entry.doc_number = r.JournalEntry?.DocNumber;
+        if (warnings.length) entry.warnings = warnings;
+      } catch (e) {
+        entry.status = "error";
+        entry.error = e.message;
+      }
+      results.push(entry);
+    }
+    const failed = results.filter((r) => r.status !== "ok").length;
+    return asText({ posted: results.length - failed, failed, results });
+  })
+);
+
+/* ===================== RECONCILIATION & REVIEW (3) ======================== */
+
+registerTool(
+  "reconcile_bank_csv",
+  "Compare a bank-statement CSV against the QBO register for that bank account: what matches, what is on the statement but not in the books, and what is in the books but not on the statement. Matches on exact amount within a date tolerance. Read-only.",
+  {
+    file_path: z.string(),
+    bank_account_name: z.string(),
+    start_date: z.string().optional().describe("YYYY-MM-DD (default: earliest statement date)"),
+    end_date: z.string().optional().describe("YYYY-MM-DD (default: latest statement date)"),
+    date_tolerance_days: z.number().int().min(0).max(14).optional().describe("Default 2"),
+    amount_convention: z.enum(["negative_out", "positive_out"]).optional(),
+    company: companyArg,
+  },
+  tool(async ({ file_path, bank_account_name, start_date, end_date, date_tolerance_days, amount_convention, company }) => {
+    const c = await resolveCompany(company);
+    const fileBytes = await readFile(expandHome(file_path));
+    const plan = planImport(parseCSV(fileBytes.toString("utf8")), { amountConvention: amount_convention });
+    if (plan.errors.length) {
+      return asText({
+        error_rows: plan.errors,
+        note: "Fix or accept these unreadable rows first; they are excluded from the comparison below.",
+      });
+    }
+    const bank = await findAccountByName(bank_account_name, c);
+    if (!bank) throw notFoundError("Account", bank_account_name, await suggestNames("Account", bank_account_name, c, "Name"));
+
+    const allDates = [...plan.outflows, ...plan.inflows].map((r) => r.date).sort();
+    const from = start_date || allDates[0];
+    const to = end_date || allDates[allDates.length - 1];
+    if (!from || !to) throw new Error("The CSV has no readable rows to reconcile.");
+
+    const purchases = await qboQueryAll(
+      `SELECT * FROM Purchase WHERE AccountRef = '${bank.Id}' AND TxnDate >= '${esc(from)}' AND TxnDate <= '${esc(to)}'`,
+      "Purchase", { company: c }
+    );
+    const deposits = await qboQueryAll(
+      `SELECT * FROM Deposit WHERE DepositToAccountRef = '${bank.Id}' AND TxnDate >= '${esc(from)}' AND TxnDate <= '${esc(to)}'`,
+      "Deposit", { company: c }
+    );
+    const registerOut = purchases.rows.map((p) => ({
+      id: p.Id, type: "Purchase", date: p.TxnDate, amount: Number(p.TotalAmt || 0),
+      payee: p.EntityRef?.name ?? null, memo: p.PrivateNote ?? null,
+    }));
+    const registerIn = deposits.rows.map((d) => ({
+      id: d.Id, type: "Deposit", date: d.TxnDate, amount: Number(d.TotalAmt || 0), memo: d.PrivateNote ?? null,
+    }));
+
+    const tolerance = { toleranceDays: date_tolerance_days ?? 2 };
+    const outflows = matchTransactions(plan.outflows, registerOut, tolerance);
+    const inflows = matchTransactions(plan.inflows, registerIn, tolerance);
+
+    return asText({
+      company: c || "(default)",
+      bank_account: bank.Name,
+      period: { from, to },
+      outflows: {
+        matched: outflows.matched.length,
+        on_statement_not_in_books: outflows.statement_only,
+        in_books_not_on_statement: outflows.register_only,
+      },
+      inflows: {
+        matched: inflows.matched.length,
+        on_statement_not_in_books: inflows.statement_only,
+        in_books_not_on_statement: inflows.register_only,
+      },
+      truncated: purchases.truncated || deposits.truncated || undefined,
+      note: "Register scan covers Purchases and Deposits on this account. Transfers and bill payments are not scanned and can explain leftovers. Statement-only outflows can be imported with import_transactions_from_csv.",
+    });
+  })
+);
+
+registerTool(
+  "find_duplicate_transactions",
+  "Scan for likely duplicate transactions: same party and exact amount, dated within a few days of each other. Returns candidate groups for human review; nothing is changed.",
+  {
+    entity: z.enum(["Purchase", "Bill", "Invoice"]),
+    start_date: z.string().optional().describe("YYYY-MM-DD"),
+    end_date: z.string().optional().describe("YYYY-MM-DD"),
+    date_window_days: z.number().int().min(0).max(31).optional().describe("Default 3"),
+    company: companyArg,
+  },
+  tool(async ({ entity, start_date, end_date, date_window_days, company }) => {
+    const c = await resolveCompany(company);
+    const where = [];
+    if (start_date) where.push(`TxnDate >= '${esc(start_date)}'`);
+    if (end_date) where.push(`TxnDate <= '${esc(end_date)}'`);
+    const sql = `SELECT * FROM ${entity}${where.length ? " WHERE " + where.join(" AND ") : ""}`;
+    const { rows, truncated } = await qboQueryAll(sql, entity, { company: c });
+    const party = (r) =>
+      entity === "Invoice" ? r.CustomerRef?.name ?? r.CustomerRef?.value
+      : entity === "Bill" ? r.VendorRef?.name ?? r.VendorRef?.value
+      : r.EntityRef?.name ?? r.AccountRef?.name ?? null;
+    const mapped = rows.map((r) => ({
+      id: r.Id, doc_number: r.DocNumber ?? null, party: party(r),
+      amount: Number(r.TotalAmt || 0), date: r.TxnDate,
+    }));
+    const groups = findDuplicateGroups(mapped, { dateWindowDays: date_window_days ?? 3 });
+    return asText({
+      entity,
+      scanned: mapped.length,
+      truncated,
+      duplicate_groups: groups.length,
+      candidates: groups,
+      note: "Same party, same amount, close dates. Review before deleting anything; legitimate repeats (rent, subscriptions) look identical.",
+    });
+  })
+);
+
+registerTool(
+  "get_general_ledger_flat",
+  "General Ledger as flat transaction rows (account, date, type, num, name, memo, split, amount) instead of QBO's nested report tree. Optional review flags mark weekend postings, large or round amounts, and journal entries. Built for review and analysis passes.",
+  {
+    start_date: z.string().optional().describe("YYYY-MM-DD"),
+    end_date: z.string().optional().describe("YYYY-MM-DD"),
+    date_macro: dateMacroArg,
+    accounting_method: accountingMethodArg,
+    flags: z.boolean().optional().describe("Attach review-heuristic flags (default true)"),
+    company: companyArg,
+  },
+  tool(async ({ start_date, end_date, date_macro, accounting_method, flags, company }) => {
+    const c = await resolveCompany(company);
+    const q = reportQuery({
+      start_date, end_date, date_macro, accounting_method,
+      columns: "tx_date,txn_type,doc_num,name,memo,split_acc,subt_nat_amount",
+    });
+    const rep = await qboRequest(`/reports/GeneralLedger${q}`, { company: c });
+    let rows = glFlatten(flattenReport(rep));
+    if (flags !== false) rows = flagGlRows(rows);
+    return asText({
+      count: rows.length,
+      rows,
+      ...(flags !== false ? { flag_meanings: {
+        weekend: "posted on a Saturday or Sunday",
+        round_amount: "1,000 or more in even hundreds",
+        large: "absolute amount of 10,000 or more",
+        journal_entry: "posted via journal entry",
+      } } : {}),
+    });
+  })
+);
+
+/* =========================== DOCUMENTS (2) =========================== */
+
+const EXPORTS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "exports");
+
+async function savePdf(kind, rec, buf, save_path) {
+  const name = `${kind}-${String(rec.DocNumber || rec.Id).replace(/[^A-Za-z0-9_-]/g, "")}.pdf`;
+  const dest = save_path ? expandHome(save_path) : path.join(EXPORTS_DIR, name);
+  await mkdir(path.dirname(dest), { recursive: true });
+  await writeFile(dest, buf);
+  return dest;
+}
+
+registerTool(
+  "get_invoice_pdf",
+  "Download an invoice as a client-ready PDF file (saved locally, default under exports/).",
+  {
+    invoice_id: z.string(),
+    save_path: z.string().optional().describe("Full file path to save to (default exports/invoice-<doc>.pdf)"),
+    company: companyArg,
+  },
+  tool(async ({ invoice_id, save_path, company }) => {
+    const c = await resolveCompany(company);
+    const inv = await fetchEntity("Invoice", invoice_id, c);
+    const buf = await qboRequestBinary(`/invoice/${encodeURIComponent(inv.Id)}/pdf`, { company: c });
+    const dest = await savePdf("invoice", inv, buf, save_path);
+    return asText({ saved_to: dest, bytes: buf.length, doc_number: inv.DocNumber ?? null, total: inv.TotalAmt ?? null });
+  })
+);
+
+registerTool(
+  "get_estimate_pdf",
+  "Download an estimate (quote) as a client-ready PDF file (saved locally, default under exports/).",
+  {
+    estimate_id: z.string(),
+    save_path: z.string().optional().describe("Full file path to save to (default exports/estimate-<doc>.pdf)"),
+    company: companyArg,
+  },
+  tool(async ({ estimate_id, save_path, company }) => {
+    const c = await resolveCompany(company);
+    const est = await fetchEntity("Estimate", estimate_id, c);
+    const buf = await qboRequestBinary(`/estimate/${encodeURIComponent(est.Id)}/pdf`, { company: c });
+    const dest = await savePdf("estimate", est, buf, save_path);
+    return asText({ saved_to: dest, bytes: buf.length, doc_number: est.DocNumber ?? null, total: est.TotalAmt ?? null });
+  })
+);
+
+/* ======================= BALANCES & BUDGET READS (5) ======================= */
+
+registerTool(
+  "get_customer_balance",
+  "Customer Balance report: what every customer currently owes.",
+  { customer: z.string().optional().describe("Limit to a single customer Id"), date_macro: dateMacroArg, company: companyArg },
+  tool(async ({ customer, date_macro, company }) => {
+    const c = await resolveCompany(company);
+    return asText(await qboRequest(`/reports/CustomerBalance${reportQuery({ customer, date_macro })}`, { company: c }));
+  })
+);
+
+registerTool(
+  "get_sales_by_customer",
+  "Sales by Customer summary report for a date range.",
+  {
+    start_date: z.string().optional().describe("YYYY-MM-DD"),
+    end_date: z.string().optional().describe("YYYY-MM-DD"),
+    date_macro: dateMacroArg,
+    accounting_method: accountingMethodArg,
+    company: companyArg,
+  },
+  tool(async ({ start_date, end_date, date_macro, accounting_method, company }) => {
+    const c = await resolveCompany(company);
+    return asText(await qboRequest(`/reports/CustomerSales${reportQuery({ start_date, end_date, date_macro, accounting_method })}`, { company: c }));
+  })
+);
+
+registerTool(
+  "get_vendor_balance",
+  "Vendor Balance report: what you currently owe every vendor.",
+  { vendor: z.string().optional().describe("Limit to a single vendor Id"), date_macro: dateMacroArg, company: companyArg },
+  tool(async ({ vendor, date_macro, company }) => {
+    const c = await resolveCompany(company);
+    return asText(await qboRequest(`/reports/VendorBalance${reportQuery({ vendor, date_macro })}`, { company: c }));
+  })
+);
+
+registerTool(
+  "get_vendor_expenses",
+  "Expenses by Vendor summary report for a date range.",
+  {
+    start_date: z.string().optional().describe("YYYY-MM-DD"),
+    end_date: z.string().optional().describe("YYYY-MM-DD"),
+    date_macro: dateMacroArg,
+    vendor: z.string().optional().describe("Limit to a single vendor Id"),
+    company: companyArg,
+  },
+  tool(async ({ start_date, end_date, date_macro, vendor, company }) => {
+    const c = await resolveCompany(company);
+    return asText(await qboRequest(`/reports/VendorExpenses${reportQuery({ start_date, end_date, date_macro, vendor })}`, { company: c }));
+  })
+);
+
+registerTool(
+  "get_budgets",
+  "List budgets (name, period, type). Pass verbose for the full budget detail lines.",
+  { verbose: verboseArg, company: companyArg },
+  tool(async ({ verbose, company }) => {
+    const c = await resolveCompany(company);
+    const { rows, truncated } = await qboQueryAll(`SELECT * FROM Budget`, "Budget", { company: c });
+    return asText({ count: rows.length, truncated, budgets: compactList("Budget", rows, verbose) });
+  })
+);
+
+/* =========================== SETUP ENTITIES (6) =========================== */
+
+registerTool(
+  "create_class",
+  "Create a class for class tracking (optionally as a sub-class).",
+  { name: z.string(), parent_class: z.string().optional().describe("Parent class name or Id"), company: companyArg },
+  tool(async ({ name, parent_class, company }) => {
+    const c = await resolveCompany(company, { write: true });
+    const payload = { Name: name };
+    if (parent_class) { payload.ParentRef = await resolveRef("Class", parent_class, c, "Name"); payload.SubClass = true; }
+    const r = await qboRequest(`/class`, { method: "POST", body: payload, company: c });
+    return asText({ created: r.Class });
+  })
+);
+
+registerTool(
+  "update_class",
+  "Rename or activate/deactivate a class (fetches SyncToken first).",
+  { class_id: z.string(), name: z.string().optional(), active: z.boolean().optional(), company: companyArg },
+  tool(async ({ class_id, name, active, company }) => {
+    const c = await resolveCompany(company, { write: true });
+    const current = await fetchEntity("Class", class_id, c);
+    const payload = { Id: current.Id, SyncToken: current.SyncToken, sparse: true };
+    if (name != null) payload.Name = name;
+    if (active != null) payload.Active = active;
+    const r = await qboRequest(`/class`, { method: "POST", body: payload, company: c });
+    return asText({ updated: r.Class });
+  })
+);
+
+registerTool(
+  "create_department",
+  "Create a location/department for location tracking (optionally as a sub-location).",
+  { name: z.string(), parent_department: z.string().optional().describe("Parent location name or Id"), company: companyArg },
+  tool(async ({ name, parent_department, company }) => {
+    const c = await resolveCompany(company, { write: true });
+    const payload = { Name: name };
+    if (parent_department) { payload.ParentRef = await resolveRef("Department", parent_department, c, "Name"); payload.SubDepartment = true; }
+    const r = await qboRequest(`/department`, { method: "POST", body: payload, company: c });
+    return asText({ created: r.Department });
+  })
+);
+
+registerTool(
+  "update_department",
+  "Rename or activate/deactivate a location/department (fetches SyncToken first).",
+  { department_id: z.string(), name: z.string().optional(), active: z.boolean().optional(), company: companyArg },
+  tool(async ({ department_id, name, active, company }) => {
+    const c = await resolveCompany(company, { write: true });
+    const current = await fetchEntity("Department", department_id, c);
+    const payload = { Id: current.Id, SyncToken: current.SyncToken, sparse: true };
+    if (name != null) payload.Name = name;
+    if (active != null) payload.Active = active;
+    const r = await qboRequest(`/department`, { method: "POST", body: payload, company: c });
+    return asText({ updated: r.Department });
+  })
+);
+
+registerTool(
+  "create_payment_method",
+  "Create a payment method (e.g. ACH, Wire).",
+  { name: z.string(), type: z.enum(["CREDIT_CARD", "NON_CREDIT_CARD"]).optional(), company: companyArg },
+  tool(async ({ name, type, company }) => {
+    const c = await resolveCompany(company, { write: true });
+    const payload = { Name: name };
+    if (type) payload.Type = type;
+    const r = await qboRequest(`/paymentmethod`, { method: "POST", body: payload, company: c });
+    return asText({ created: r.PaymentMethod });
+  })
+);
+
+registerTool(
+  "create_term",
+  "Create a payment term (e.g. Net 45).",
+  { name: z.string(), due_days: z.number().int().positive(), company: companyArg },
+  tool(async ({ name, due_days, company }) => {
+    const c = await resolveCompany(company, { write: true });
+    const r = await qboRequest(`/term`, { method: "POST", body: { Name: name, DueDays: due_days }, company: c });
+    return asText({ created: r.Term });
+  })
+);
+
+/* =========================== DANGER ZONE (1) =========================== */
+
+registerTool(
+  "delete_transaction",
+  "PERMANENTLY delete a transaction; this cannot be undone (prefer void_invoice for invoices, which keeps the number trail). Pairs with find_duplicate_transactions for removing confirmed duplicates. Policy-checked, closed-period-checked, and audit-logged.",
+  {
+    entity: z.enum(["Invoice", "Bill", "BillPayment", "Payment", "Purchase", "JournalEntry", "Deposit", "Transfer", "VendorCredit", "CreditMemo", "RefundReceipt", "SalesReceipt", "Estimate", "TimeActivity"]),
+    transaction_id: z.string(),
+    company: companyArg,
+  },
+  tool(async ({ entity, transaction_id, company }) => {
+    const c = await resolveCompany(company, { write: true });
+    const current = await fetchEntity(entity, transaction_id, c);
+    const warnings = await closedPeriodWarnings(c, [current.TxnDate]);
+    const r = await qboRequest(`/${entity.toLowerCase()}?operation=delete`, {
+      method: "POST",
+      body: { Id: current.Id, SyncToken: current.SyncToken },
+      company: c,
+    });
+    return asText(withWarnings({
+      deleted: {
+        entity,
+        id: current.Id,
+        doc_number: current.DocNumber ?? null,
+        txn_date: current.TxnDate ?? null,
+        total: current.TotalAmt ?? null,
+      },
+      qbo_status: r[entity]?.status ?? "Deleted",
+    }, warnings));
+  })
+);
+
 /* =========================== ATTACHMENTS & ADVANCED =========================== */
 
-server.tool(
+registerTool(
   "attach_file",
   "Attach a file (from a local path) and/or a note to a QuickBooks record, or upload a standalone file. Link it to a record with attach_to_entity + attach_to_id.",
   {
@@ -1689,7 +2488,7 @@ server.tool(
       return asText({ created: r.Attachable });
     }
 
-    const buf = await readFile(file_path.replace(/^~(?=$|\/)/, process.env.HOME));
+    const buf = await readFile(expandHome(file_path));
     const name = file_name || path.basename(file_path);
     const ctype = content_type || guessContentType(name);
     const meta = { FileName: name, ContentType: ctype };
@@ -1703,7 +2502,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "get_attachments",
   "List attachments (files/notes), optionally only those linked to a specific record.",
   {
@@ -1728,7 +2527,7 @@ server.tool(
   })
 );
 
-server.tool(
+registerTool(
   "api_request",
   "Advanced escape hatch: make a raw authenticated call to any QBO endpoint under /v3/company/{realmId}. Provide `path` (e.g. \"/reports/GeneralLedger?start_date=2026-01-01\", \"/query?query=SELECT * FROM Bill\", \"/invoice/145\"), an HTTP method, and an optional JSON body. Auth, realm, and minorversion are handled for you.",
   {
@@ -1755,7 +2554,34 @@ server.tool(
   })
 );
 
+// Path validation shared with api_request, GET-only. Split out so permission
+// settings can distinguish them: api_get is safe to always-allow, while
+// api_request (which can write) should stay behind approval.
+registerTool(
+  "api_get",
+  "Read-only escape hatch: GET any QBO endpoint under /v3/company/{realmId} (reports, queries, single records). Never writes; safe to always-allow. Use api_request when a POST is required.",
+  {
+    path: z.string().describe("Path after /v3/company/{realmId}, starting with '/'"),
+    company: companyArg,
+  },
+  tool(async ({ path: reqPath, company }) => {
+    const c = await resolveCompany(company);
+    const p = reqPath.startsWith("/") ? reqPath : `/${reqPath}`;
+    if (/[\r\n\t]/.test(p)) throw new Error("Control characters are not allowed in `path`.");
+    let decodedPath;
+    try {
+      decodedPath = decodeURIComponent(p.split("?")[0]);
+    } catch {
+      throw new Error("Invalid percent-encoding in `path`.");
+    }
+    if (decodedPath.includes("..") || decodedPath.includes("\\")) {
+      throw new Error("Path traversal sequences are not allowed in `path`; it must stay under /v3/company/{realmId}.");
+    }
+    return asText(await qboRequest(p, { company: c }));
+  })
+);
+
 // ---- start -----------------------------------------------------------------
 const transport = new StdioServerTransport();
 await server.connect(transport);
-log("QBO MCP server running (stdio).");
+log(`QBO MCP server running (stdio).${suppressedTools ? ` ${suppressedTools} write tools suppressed by QBO_DISABLE_* env.` : ""}`);

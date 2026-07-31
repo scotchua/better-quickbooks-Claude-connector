@@ -26,8 +26,11 @@ This tool fixes both:
   no restarts.
 - **Read *and* write.** Create invoices, bills, journal entries, and more — the
   things you actually do in QuickBooks.
-- **55 tools** covering reports, transactions, lists, attachments, diagnostics,
-  and a safe bulk CSV import.
+- **98 tools** covering reports, transactions, searches with typed filters,
+  bill payments, invoice and estimate PDFs, attachments, change tracking,
+  reconciliation, multi-company consolidation, diagnostics, and a safe bulk
+  CSV import. Connecting a new client happens in the chat: Claude hands you an
+  Intuit link, you click Allow, and it confirms which company landed.
 
 You do **not** need to know how to code. The setup below is copy-and-paste.
 
@@ -40,12 +43,19 @@ You do **not** need to know how to code. The setup below is copy-and-paste.
 - **Pull reports:** Profit & Loss, Balance Sheet, Cash Flow, Trial Balance,
   General Ledger, A/R and A/P aging, overdue invoices.
 - **Enter and edit work:** customers, vendors, items, accounts, invoices, bills,
-  expenses, estimates, sales receipts, credit memos, payments, deposits, and
-  journal entries.
-- **Speed up month-end:** import a bank CSV (with a preview first), attach source
-  documents, and run collections.
+  bill payments, transfers, expenses, estimates, sales receipts, credit memos,
+  payments, deposits, and journal entries, with class, location, and sales-tax
+  tagging on line items.
+- **Speed up month-end:** import a bank CSV (with a preview first, sign-aware,
+  and safe to re-run), attach source documents, run collections, and pull
+  "what changed since" reports for any entity.
 - **Work across clients:** switch between companies in one connector, or name one
-  per request.
+  per request. Run a consolidated P&L or Balance Sheet across every client at
+  once, or post the same journal entry (like a monthly management fee) to many
+  files in one call.
+- **Review the books:** reconcile a bank statement against the register, scan
+  for duplicate transactions, and pull a flat general ledger with review flags
+  (weekend postings, large or round amounts, journal entries).
 
 ---
 
@@ -99,6 +109,15 @@ QuickBooks (Intuit). That means:
   file, so the code can be shared safely.
 - **Secrets never show up in logs.** The app writes its notes to a hidden channel
   (not the main output), and it never prints your keys or tokens.
+- **Login passes are scrambled on disk.** Each company's tokens are encrypted
+  (AES-256-GCM) before they are saved. The unlock key lives in your Mac's
+  Keychain or Windows protected storage, so a copied token file is useless on
+  its own. Offboarding a client? `npm run disconnect -- <nickname>` revokes the
+  access with Intuit and removes the file.
+- **Every change is written down.** Each action that changes your books is
+  recorded in a local log (`audit-log/`), so you can always answer "what did
+  Claude post, and when." Writes dated into a closed period come back with a
+  warning.
 
 ### Keeping the login safe
 
@@ -214,10 +233,12 @@ npm run connect:batch                 # keeps asking "add another?"
 npm run connect:batch -- --count 50   # or do a set number in a row
 ```
 
-**Step 7 — Tell Claude Desktop about the app.**
+**Step 7 — Tell Claude Desktop about the app (once, ever).**
 The easiest way is to let Claude do it for you: open **Claude Code** and type
-`/add-qbo-company`, then follow the prompts. It sets everything up and checks it
-worked. (If you'd rather do it by hand, see *Setup (quick reference)* below.)
+`/add-qbo-company`, then follow the prompts. It registers a single **`qbo`**
+connector that serves every company you connect, now or later, and checks that
+it worked. (If you'd rather do it by hand, see *Setup (quick reference)* in
+DEVELOPER.md.) After this one-time step, adding more companies needs no restart.
 
 **Step 8 — Restart Claude Desktop.**
 - **Mac:** Quit Claude Desktop completely (`Cmd + Q`), then open it again.
@@ -243,8 +264,14 @@ Each tool can be set to **Always allow** (✓), **Needs approval** (✋), or **N
   loss, Get balance sheet, Get cash flow, Get aged receivables, Get invoices.*
 - **Write tools → Needs approval.** They *change* the books, so keep a human in
   the loop — Claude pauses and asks before each. Examples: *Create invoice, Create
-  bill, Create journal entry, Send invoice email, Void invoice, Import
-  transactions from CSV.*
+  bill, Create bill payment, Create journal entry, Send invoice email, Void
+  invoice, Import transactions from CSV.*
+- **The two escape hatches differ:** `api_get` only reads, so it can be Always
+  allow. `api_request` can post anything to QuickBooks; keep it on **Needs
+  approval** (or Never).
+- **Firm-wide off switches:** set `QBO_DISABLE_WRITES=true` in `.env` and the
+  write tools are never registered at all (a read-only deployment for review
+  staff), or `QBO_DISABLE_DELETES=true` to hide just deletes and voids.
 
 You get quick answers on anything that just reads, and a confirmation step on
 anything that posts. Repeat for each client connector.
@@ -252,6 +279,8 @@ anything that posts. Repeat for each client connector.
 Stuck on a step? Just tell Claude Code what happened — it can re-check the
 connection, re-authorize a company, or add another one for you.
 
+> **Testing:** see **[TESTING.md](TESTING.md)** for a staged verification checklist (automated, sandbox, production pilot).
+>
 > **Developers:** technical setup, the full tool list, and architecture live in
 > **[DEVELOPER.md](DEVELOPER.md)**.
 

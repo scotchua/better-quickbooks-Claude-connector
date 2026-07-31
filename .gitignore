@@ -3,9 +3,21 @@ node_modules/
 # Secrets — never commit
 .env
 tokens*.json
+.qbo-key*
+
+# Local records (write audit log, CSV import journal)
+audit-log/
+
+# Downloaded documents (invoice/estimate PDFs)
+exports/
 
 # Generated output / scratch
 save-excels-here/
 *.log
 *.mjs
 .DS_Store
+__pycache__/
+
+# Client roster (local labels, includes client names)
+clients.json
+clients.json.bak

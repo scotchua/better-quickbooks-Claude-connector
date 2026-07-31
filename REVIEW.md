@@ -71,6 +71,8 @@ The review itself changed no code; findings reference the codebase at commit `11
 
 ### Medium-Term Improvements (est. 1-3 weeks each)
 
+**Status (2026-07-31): implemented on this branch after maintainer approval**, with two scoped exceptions: the full TypeScript migration (helpers now live in focused modules; typing remains open) and the unified-model docs rewrite of SETUP_GUIDE and the bundled skill (tracked under Major).
+
 - Local append-only write audit log (JSONL): timestamp, tool, company, realm, entity, Id, DocNumber, amount. Firms need this for engagement documentation. (Persistence approach approved; see Decisions.)
 - Encrypted-at-rest token storage (required per Decisions): AES-256-GCM via `node:crypto`, master key in an OS secret store reached without native dependencies (macOS `security` CLI, Windows DPAPI via PowerShell), permission-restricted key file as fallback; includes migration from the plaintext files.
 - CSV import idempotency: stamp each Purchase's `PrivateNote` with an import-batch marker, pre-check for duplicates, record an import journal, support resume. Also fix sign handling: `Math.abs()` on amounts turns bank credits into expenses (`src/index.js:952`), and raw CSV dates pass through unvalidated (`src/index.js:983`).
@@ -86,6 +88,10 @@ The review itself changed no code; findings reference the codebase at commit `11
 - Split `src/index.js` (1,660 lines) into domain modules; migrate to TypeScript or JSDoc + `tsc --checkJs`.
 
 ### Major Architectural Enhancements (quarter-scale)
+
+**Status (2026-07-31): largely implemented on this branch.** Shipped: the unified deployment story (docs, skill, and cross-platform scripts rewritten; per-company connectors documented as legacy with migration notes), fleet operations (consolidated P&L and Balance Sheet, multi-company journal entries), the reconciliation and review toolkit (statement-vs-register matching, duplicate detection, flat GL with review flags), the per-company policy engine (read-only, amount ceiling, date floor, centrally enforced), and a 60-second name-index cache. Still open, deliberately: the full TypeScript migration, a semantic (embedding-based) entity index beyond the TTL cache, and any webhook relay (a local desktop process cannot receive Intuit webhooks; scheduled CDC polling via `get_changes_since` is the supported substitute).
+
+**Benchmark adoption (2026-07-31):** after a comparison against Intuit's MIT-licensed [quickbooks-online-mcp-server](https://github.com/intuit/quickbooks-online-mcp-server), the fork adopted its best patterns: registration-time verb kill switches (`QBO_DISABLE_WRITES`, `QBO_DISABLE_DELETES`), invoice and estimate PDF downloads, typed allowlisted search filters with sort, the missing balance/budget/tax/terms read surface, setup-entity writes (class, department, payment method, term), a single gated `delete_transaction` instead of their 20 delete tools, and a dotenv hardening fix for host-injected empty env values. Tool count is now 90. The comparison also confirmed this fork's differentiators (multi-company, encrypted tokens, retry/audit/guardrails, fleet and reconciliation tooling) have no equivalent in the official server.
 
 - Unify the deployment story. **Decided 2026-07-31: unified is canonical.** The single `qbo` connector becomes the only documented path; SETUP_GUIDE and the `add-qbo-company` skill get rewritten to register one connector and rely on `select_company`/`company` arguments; per-company connectors are documented as legacy with a migration note. Locking design follows: in-process single-flight refresh plus atomic token writes cover the canonical path, with cross-process file locking kept as defense in depth for legacy installs and for `npm run connect` running beside a live server.
 - Multi-company fleet operations: consolidated P&L/BS across companies, same JE posted to N companies, batch report packets. This is the feature no first-party tool offers and the strongest differentiator for firms.
@@ -341,10 +347,11 @@ The open questions from the initial review were resolved as follows. The affecte
 - **Token storage: secure storage is required** (an OS keychain specifically is not mandated). File permissions plus relocation are interim hardening only. Target design: AES-256-GCM encryption of token files via `node:crypto`, master key in an OS secret store reached without native dependencies (macOS `security` CLI, Windows DPAPI via PowerShell), permission-restricted key file as fallback. Apply the same pattern to `.env` client credentials once tokens are done.
 - **Local persistence: approved.** JSONL first (write audit log, CSV import journal): no new dependency, append-only, greppable. Adopt SQLite only when query needs justify it (entity cache, semantic index), preferring the built-in `node:sqlite` module once the supported Node floor reaches a version where it is stable, rather than a native npm dependency.
 
-### Still open (not blocking the quick wins)
+### Still open (updated after the major-tier batch)
 
-- **`api_request` posture** in the unified model: keep as one tool, split into `api_get`/`api_post` for permission granularity, or gate behind an env flag.
-- **The `sandbox-backup` special case** (`src/qbo.js:26`): move backups to a `backups/` directory or keep the special-cased name.
+- **`api_request` posture: resolved.** A read-only `api_get` tool was added so permission settings can always-allow reads while `api_request` (which can POST) stays behind approval; documented in README Step 9.
+- **The `sandbox-backup` special case** (`src/qbo.js:26`): kept as-is for now; a `backups/` directory remains the cleaner long-term convention.
+- **License:** still missing, and not something to add unilaterally. The original code was published without a license, so relicensing needs the original author's consent (or a clean-room rewrite of their portions). Resolve before sharing outside the firm.
 
 ---
 

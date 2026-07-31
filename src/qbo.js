@@ -10,15 +10,19 @@
 import http from "node:http";
 import { exec } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { readFile, writeFile, readdir, rename } from "node:fs/promises";
+import { readFile, writeFile, readdir, rename, unlink } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { encryptionEnabled, encryptTokens, decryptTokens, isEncrypted } from "./secure-store.js";
+import { record as auditRecord, summarizeResponse } from "./audit.js";
+import { checkWritePolicy } from "./policy.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
 
 const AUTHORIZE_URL = "https://appcenter.intuit.com/connect/oauth2";
 const TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer";
+const REVOKE_URL = "https://developer.api.intuit.com/v2/oauth2/tokens/revoke";
 const SCOPE = "com.intuit.quickbooks.accounting";
 // Intuit sunset minor versions 1-74 on 2025-08-01; 75 is the supported baseline.
 const MINOR_VERSION = process.env.QBO_MINOR_VERSION || "75";
@@ -121,20 +125,38 @@ function basicAuthHeader({ clientId, clientSecret }) {
 }
 
 async function loadTokens(slug) {
+  let parsed;
   try {
-    const raw = await readFile(tokensPathFor(slug), "utf8");
-    return JSON.parse(raw);
+    parsed = JSON.parse(await readFile(tokensPathFor(slug), "utf8"));
   } catch {
+    return null;
+  }
+  try {
+    if (isEncrypted(parsed)) return await decryptTokens(parsed);
+    // Legacy plaintext file: migrate to encrypted-at-rest on first touch.
+    if (encryptionEnabled() && parsed?.access_token) {
+      try {
+        await saveTokens(slug, parsed);
+      } catch (e) {
+        log("Could not migrate token file to encrypted storage:", e.message);
+      }
+    }
+    return parsed;
+  } catch (e) {
+    log(`Could not decrypt ${tokensPathFor(slug)}: ${e.message}`);
     return null;
   }
 }
 
 async function saveTokens(slug, tokens) {
   const p = tokensPathFor(slug);
-  // Owner-only permissions, written atomically: a temp file with 0600 perms is
-  // renamed over the target so concurrent readers never see a torn file.
+  // Credentials are encrypted at rest (realmId/environment stay plaintext for
+  // company discovery). Owner-only permissions, written atomically: a temp
+  // file with 0600 perms is renamed over the target so concurrent readers
+  // never see a torn file.
+  const payload = encryptionEnabled() ? await encryptTokens(tokens) : tokens;
   const tmp = `${p}.${process.pid}.tmp`;
-  await writeFile(tmp, JSON.stringify(tokens, null, 2), { encoding: "utf8", mode: 0o600 });
+  await writeFile(tmp, JSON.stringify(payload, null, 2), { encoding: "utf8", mode: 0o600 });
   await rename(tmp, p);
   log("Tokens saved to", p);
 }
@@ -287,6 +309,123 @@ async function runAuthorizationFlow() {
   });
 }
 
+// ---- interactive authorization (no terminal) --------------------------------
+// The CLI flow above blocks until the browser callback lands, which is fine for
+// `npm run connect` but wrong for a tool call: a human clicking through Intuit
+// takes minutes and a tool must answer in seconds. So the interactive flow is
+// split in two. beginAuthorization starts a loopback listener and returns the
+// URL immediately; the listener keeps running in this long-lived MCP process
+// and parks its result here. authorizationStatus reads that result.
+//
+// One authorization at a time, because they all want the same callback port.
+let pending = null;
+
+function authorizationStatus() {
+  if (!pending) return { state: "idle" };
+  const { slug, environment, startedAt, expiresAt, result, error } = pending;
+  const base = { slug, environment, started_at: new Date(startedAt).toISOString() };
+  if (result) return { ...base, state: "connected", realmId: result.realmId };
+  if (error) return { ...base, state: "failed", error };
+  if (Date.now() > expiresAt) return { ...base, state: "expired" };
+  return { ...base, state: "waiting", seconds_remaining: Math.round((expiresAt - Date.now()) / 1000) };
+}
+
+function cancelAuthorization() {
+  if (!pending) return { state: "idle" };
+  const slug = pending.slug;
+  try { pending.server?.close(); } catch { /* already closed */ }
+  pending = null;
+  return { state: "cancelled", slug };
+}
+
+// Returns { authorize_url, slug, environment, expires_in_seconds } right away.
+// `ttlMs` bounds how long the listener stays open, so an abandoned attempt
+// cannot leave a port bound for the life of the process.
+async function beginAuthorization({ company, environment, openBrowserWindow = true, ttlMs = 10 * 60_000 } = {}) {
+  const creds = credentials(); // throws early if .env is missing keys
+  const slug = sanitizeSlug(company ?? "");
+  const env = (environment || connectEnvironment()).toLowerCase();
+  if (env !== "sandbox" && env !== "production") {
+    throw new Error(`environment must be "sandbox" or "production", got "${environment}".`);
+  }
+
+  const live = authorizationStatus();
+  if (live.state === "waiting") {
+    throw new Error(
+      `An authorization for "${live.slug || "(default)"}" is already waiting (${live.seconds_remaining}s left). ` +
+      `Finish it in the browser, or cancel it first.`
+    );
+  }
+  if (pending) cancelAuthorization(); // clear a finished or expired attempt
+
+  const state = randomBytes(16).toString("hex");
+  const redirect = new URL(creds.redirectUri);
+  const port = Number(redirect.port) || 3000;
+  const authUrl =
+    `${AUTHORIZE_URL}?client_id=${encodeURIComponent(creds.clientId)}` +
+    `&response_type=code&scope=${encodeURIComponent(SCOPE)}` +
+    `&redirect_uri=${encodeURIComponent(creds.redirectUri)}&state=${state}`;
+
+  const server = http.createServer(async (req, res) => {
+    const finish = (code, body) => { try { res.writeHead(code, { "Content-Type": "text/html" }).end(body); } catch {} };
+    try {
+      const url = new URL(req.url, `http://localhost:${port}`);
+      if (url.pathname !== redirect.pathname) return finish(404, "Not found");
+
+      const authCode = url.searchParams.get("code");
+      const realmId = url.searchParams.get("realmId");
+      if (url.searchParams.get("state") !== state) {
+        if (pending) pending.error = "OAuth state mismatch, possible CSRF. Start over.";
+        finish(400, "<h2>State mismatch</h2><p>Close this tab and start the authorization again.</p>");
+        server.close();
+        return;
+      }
+      if (!authCode || !realmId) {
+        if (pending) pending.error = "Callback arrived without a code or realmId.";
+        finish(400, "<h2>Incomplete callback</h2><p>Close this tab and start over.</p>");
+        server.close();
+        return;
+      }
+
+      const tokens = await exchangeCodeForTokens(authCode, env);
+      tokens.realmId = realmId;
+      await saveTokens(slug, tokens);
+      if (pending) pending.result = tokens;
+      finish(200,
+        `<html><body style="font-family:sans-serif;padding:3rem;text-align:center">
+           <h2>QuickBooks connected</h2>
+           <p>You can close this tab and return to Claude.</p>
+         </body></html>`);
+      server.close();
+      log(`Connected realmId ${realmId} (${env})${slug ? ` as "${slug}"` : ""} via interactive authorization.`);
+    } catch (e) {
+      if (pending) pending.error = e.message;
+      finish(500, "<h2>Authorization failed</h2><p>Return to Claude for the details.</p>");
+      server.close();
+    }
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once("error", (e) => {
+      reject(e.code === "EADDRINUSE"
+        ? new Error(`Port ${port} is busy. Another authorization or process holds it; stop that first.`)
+        : e);
+    });
+    server.listen(port, "127.0.0.1", resolve);
+  });
+
+  const startedAt = Date.now();
+  pending = { slug, environment: env, state, server, startedAt, expiresAt: startedAt + ttlMs, result: null, error: null };
+  setTimeout(() => {
+    if (pending?.startedAt === startedAt && !pending.result && !pending.error) {
+      try { pending.server?.close(); } catch { /* already closed */ }
+    }
+  }, ttlMs).unref?.();
+
+  if (openBrowserWindow) openBrowser(authUrl);
+  return { authorize_url: authUrl, slug, environment: env, expires_in_seconds: Math.round(ttlMs / 1000) };
+}
+
 async function refreshTokens(slug, existing) {
   // Intuit rotates the refresh token on every refresh, so a parallel caller or
   // another process may already have rotated it. Prefer the newest state on
@@ -396,6 +535,10 @@ async function getValidTokens(slug, { allowInteractive = false } = {}) {
 // `company` option selects which company's tokens (and thus realmId + API host)
 // to use; omit it to use DEFAULT_COMPANY.
 async function qboRequest(pathAndQuery, { method = "GET", body, company } = {}) {
+  // Central policy gate: every write, from any tool, passes through here.
+  if (method !== "GET") {
+    await checkWritePolicy(sanitizeSlug(company ?? DEFAULT_COMPANY), body ?? null);
+  }
   const tokens = await getValidTokens(company ?? DEFAULT_COMPANY);
   const apiBase = apiBaseFor(tokens.environment);
   const sep = pathAndQuery.includes("?") ? "&" : "?";
@@ -417,12 +560,33 @@ async function qboRequest(pathAndQuery, { method = "GET", body, company } = {}) 
   let data;
   try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
 
+  // intuit_tid is Intuit's per-request trace id; it goes into errors and the
+  // audit log because Intuit support asks for it.
+  const tid = res.headers.get("intuit_tid") || undefined;
+  const fault = data?.Fault?.Error?.[0];
+  const detail = fault
+    ? `${fault.Message}${fault.Detail ? ": " + fault.Detail : ""}`
+    : text;
+
+  if (method !== "GET") {
+    await auditRecord({
+      kind: "api_write",
+      method,
+      path: pathAndQuery.split("?")[0],
+      company: sanitizeSlug(company ?? DEFAULT_COMPANY) || "(default)",
+      realmId: tokens.realmId,
+      environment: tokens.environment,
+      status: res.status,
+      ok: res.ok,
+      intuit_tid: tid,
+      ...(res.ok ? summarizeResponse(data) : { error: String(detail).slice(0, 500) }),
+    });
+  }
+
   if (!res.ok) {
-    const fault = data?.Fault?.Error?.[0];
-    const detail = fault
-      ? `${fault.Message}${fault.Detail ? " — " + fault.Detail : ""}`
-      : text;
-    throw new Error(`QBO API ${res.status} on ${method} ${pathAndQuery}: ${detail}`);
+    throw new Error(
+      `QBO API ${res.status} on ${method} ${pathAndQuery}: ${detail}${tid ? ` (intuit_tid: ${tid})` : ""}`
+    );
   }
   return data;
 }
@@ -430,6 +594,29 @@ async function qboRequest(pathAndQuery, { method = "GET", body, company } = {}) 
 async function qboQuery(sql, { company } = {}) {
   const data = await qboRequest(`/query?query=${encodeURIComponent(sql)}`, { company });
   return data.QueryResponse || {};
+}
+
+// Binary GET (invoice/estimate PDFs). Returns a Buffer, capped so a runaway
+// response cannot balloon memory (override with QBO_PDF_MAX_BYTES).
+async function qboRequestBinary(pathAndQuery, { company, accept = "application/pdf" } = {}) {
+  const tokens = await getValidTokens(company ?? DEFAULT_COMPANY);
+  const apiBase = apiBaseFor(tokens.environment);
+  const sep = pathAndQuery.includes("?") ? "&" : "?";
+  const url = `${apiBase}/v3/company/${tokens.realmId}${pathAndQuery}${sep}minorversion=${MINOR_VERSION}`;
+  const res = await qboFetch(url, {
+    headers: { Authorization: `Bearer ${tokens.access_token}`, Accept: accept },
+  }, { idempotent: true });
+  const tid = res.headers.get("intuit_tid") || undefined;
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`QBO API ${res.status} on GET ${pathAndQuery}: ${text.slice(0, 300)}${tid ? ` (intuit_tid: ${tid})` : ""}`);
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  const cap = Number(process.env.QBO_PDF_MAX_BYTES) || 50 * 1024 * 1024;
+  if (buf.length > cap) {
+    throw new Error(`Response is ${buf.length} bytes, above the ${cap}-byte cap (raise QBO_PDF_MAX_BYTES if this is expected).`);
+  }
+  return buf;
 }
 
 // Multipart upload to /v3/company/{realmId}/upload (the Attachable file endpoint).
@@ -447,9 +634,22 @@ async function qboUpload(formData, { company } = {}) {
   const text = await res.text();
   let data;
   try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+  const tid = res.headers.get("intuit_tid") || undefined;
+  await auditRecord({
+    kind: "api_write",
+    method: "POST",
+    path: "/upload",
+    company: sanitizeSlug(company ?? DEFAULT_COMPANY) || "(default)",
+    realmId: tokens.realmId,
+    environment: tokens.environment,
+    status: res.status,
+    ok: res.ok,
+    intuit_tid: tid,
+  });
   if (!res.ok) {
     const fault = data?.Fault?.Error?.[0];
-    throw new Error(`QBO upload ${res.status}: ${fault ? `${fault.Message}${fault.Detail ? " — " + fault.Detail : ""}` : text}`);
+    const detail = fault ? `${fault.Message}${fault.Detail ? ": " + fault.Detail : ""}` : text;
+    throw new Error(`QBO upload ${res.status}: ${detail}${tid ? ` (intuit_tid: ${tid})` : ""}`);
   }
   return data;
 }
@@ -457,6 +657,35 @@ async function qboUpload(formData, { company } = {}) {
 async function getRealmId(company) {
   const tokens = await getValidTokens(company ?? DEFAULT_COMPANY);
   return tokens.realmId;
+}
+
+// Revoke a company's OAuth grant with Intuit and delete its token file. This
+// is the offboarding step: deleting the file alone would leave the grant live
+// on Intuit's side until it expires on its own.
+async function disconnectCompany(slug) {
+  const label = sanitizeSlug(slug) || "the default company";
+  const tokens = await loadTokens(slug);
+  if (!tokens?.refresh_token) {
+    throw new Error(`No stored tokens for ${label}; nothing to disconnect.`);
+  }
+  const creds = credentials();
+  const res = await qboFetch(REVOKE_URL, {
+    method: "POST",
+    headers: {
+      Authorization: basicAuthHeader(creds),
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({ token: tokens.refresh_token }),
+  }, { idempotent: true });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Token revocation failed for ${label} (HTTP ${res.status}): ${text}`);
+  }
+  await unlink(tokensPathFor(slug));
+  await auditRecord({ kind: "disconnect", company: sanitizeSlug(slug) || "(default)", realmId: tokens.realmId ?? null });
+  log(`Revoked Intuit access and removed the token file for ${label}.`);
+  return { slug: sanitizeSlug(slug), realmId: tokens.realmId ?? null };
 }
 
 // Derive a short, stable, filesystem-safe slug from a realmId: the last 4 digits,
@@ -586,10 +815,15 @@ export {
   getValidTokens,
   qboRequest,
   qboQuery,
+  qboRequestBinary,
   qboUpload,
   getRealmId,
   runAuthorizationFlow,
   runBatchAuthorization,
+  disconnectCompany,
+  beginAuthorization,
+  authorizationStatus,
+  cancelAuthorization,
   deriveSlugFromRealm,
   listCompanies,
   sanitizeSlug,
