@@ -814,6 +814,7 @@ export {
   credentials,
   getValidTokens,
   saveTokens,
+  exchangeCodeForTokens,
   qboRequest,
   qboQuery,
   qboRequestBinary,

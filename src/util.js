@@ -1,6 +1,8 @@
 // util.js: small pure helpers shared across the connector. No I/O here, so
 // everything in this file is unit-testable in isolation.
 
+import path from "node:path";
+
 export const todayISO = () => new Date().toISOString().slice(0, 10);
 
 // Escape a string value for interpolation into a QBO query string literal.
@@ -53,4 +55,27 @@ export function assertBalanced(lines) {
 // Expand a leading ~ to the user's home directory.
 export function expandHome(p) {
   return String(p).replace(/^~(?=$|\/)/, process.env.HOME || "~");
+}
+
+// Names that user-supplied file paths may never touch, read or write: key
+// material and credential files. Applies regardless of QBO_FILES_DIR.
+const SENSITIVE_BASENAME = /^(\.env(\..*)?|tokens(\..*)?\.json|\.qbo-key(\..*)?|id_rsa.*|id_ed25519.*|.*\.pem|\.npmrc|\.netrc)$/i;
+
+// Resolve a user/model-supplied local path for reading or writing.
+// - Expands ~ and resolves to an absolute path.
+// - Refuses credential-shaped basenames always.
+// - When QBO_FILES_DIR is set, refuses anything outside that directory tree
+//   (the recommended firm setting is the client-files root, e.g. ~/Claude).
+export function resolveUserPath(p, { purpose = "read" } = {}) {
+  const abs = path.resolve(expandHome(p));
+  if (SENSITIVE_BASENAME.test(path.basename(abs))) {
+    throw new Error(`Refusing to ${purpose} ${path.basename(abs)}: credential-shaped filename.`);
+  }
+  const base = process.env.QBO_FILES_DIR ? path.resolve(expandHome(process.env.QBO_FILES_DIR)) : null;
+  if (base && abs !== base && !abs.startsWith(base + path.sep)) {
+    throw new Error(
+      `Refusing to ${purpose} outside QBO_FILES_DIR (${base}): ${abs}. Move the file inside it, or change QBO_FILES_DIR in .env.`
+    );
+  }
+  return abs;
 }

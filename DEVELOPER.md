@@ -69,7 +69,7 @@ Windows (use `node.exe`, and **double** every backslash in JSON):
 }
 ```
 Fully **quit and reopen** Claude Desktop. `qbo` appears under
-**Settings → Connectors** with all 98 tools.
+**Settings → Connectors** with all 114 tools.
 
 ## Multiple companies (one connector)
 
@@ -100,7 +100,17 @@ troubleshooting reference. After the first setup, adding a company needs no
 restart. Legacy per-company `qbo-<slug>` connectors still work; the scripts
 report them and support migration to the unified entry.
 
-## Tools (98)
+## Tools (114)
+
+**Added 2026-08-02** (16): get_preferences, get_aged_receivables_detail,
+get_aged_payables_detail, get_profit_and_loss_detail, get_inventory_valuation,
+get_item_sales, get_unbilled_time, get_recurring_transactions,
+download_attachment, execute_batch, create_invoice_from_estimate,
+create_reversing_journal_entry, update_account, update_employee, void_payment,
+void_sales_receipt. Aging tools gained report_date/aging_method; P&L, Balance
+Sheet, and Cash Flow gained summarize_column_by; every literal date argument is
+schema-validated; every write response echoes the company it hit; deletes and
+voids are policy-checked against the fetched entity's amount and date.
 
 **Company selection & diagnostics (4):** `list_companies`, `select_company`,
 `get_active_company`, `health_check`
@@ -170,6 +180,43 @@ audit-logged)
 > `/reports/ProfitAndLossDetail?...`, `/query?query=SELECT * FROM Bill`) and
 > auth, realm, and minorversion are handled. `api_get` is read-only (safe to
 > always-allow); `api_request` can POST and belongs behind approval.
+
+
+## Token broker for sibling tools
+
+`node src/index.js --access-token <slug>` prints one JSON line
+(`{slug, realmId, environment, access_token, expires_at}`) on stdout and logs to
+stderr. This is the ONLY supported way for another local process to reach
+QuickBooks with this connector's authorizations: Intuit rotates the refresh
+token on every refresh and invalidates the one it replaces, so exactly one
+process (this server) ever refreshes. The Python services under
+`~/Claude/qbo-collector` call this and cache the one-hour access token per
+realm. Every issuance is written to the audit log (`kind: token_brokered`,
+with the caller's parent pid). The refresh token never leaves this process.
+
+## Hardening env vars
+
+- `QBO_FILES_DIR`: when set, every user-supplied local file path (CSV import,
+  reconcile, attachments, PDF/attachment save paths) must resolve inside this
+  directory tree; credential-shaped filenames (.env*, tokens*.json, keys) are
+  refused regardless. Recommended: the client-files root, e.g. `~/Claude`.
+- `QBO_REQUIRE_EXPLICIT_COMPANY=true`: writes require an explicit `company`
+  argument on every call; session (`select_company`) and env defaults stop
+  applying to writes. Recommended when several conversations share the
+  connector, since the session default is process-global.
+- Existing switches: `QBO_DISABLE_WRITES`, `QBO_DISABLE_DELETES`,
+  `QBO_CLOSED_PERIOD=warn|block|off`, `QBO_POLICY_FILE`, `QBO_AUDIT=off`,
+  `QBO_AUDIT_DIR`, `QBO_TIMEOUT_MS`, `QBO_PDF_MAX_BYTES`, `QBO_MINOR_VERSION`.
+
+## Known-broken QBO endpoints (deliberately not wrapped)
+
+- `reports/BudgetVsActuals`: returns HTTP 200 with an Actual column that is
+  inception-to-date regardless of the requested dates. Budget-vs-actual is done
+  by joining the Budget entity (get_budgets verbose) to monthly P&L.
+- The sales-tax report family (`reports/TaxSummary` and siblings): unreliable;
+  compute sales-tax positions from the liability account's general ledger.
+- Webhooks: a local desktop process cannot receive them; scheduled CDC polling
+  via get_changes_since is the supported substitute.
 
 ## Notes
 
