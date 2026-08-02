@@ -100,9 +100,31 @@ describe("checkWritePolicy", () => {
     process.env.QBO_POLICY_FILE = path.join(dir, "qbo-policy.json");
 
     await setCompanyPolicy("temp", { read_only: true });
-    const r = await setCompanyPolicy("temp", { read_only: false });
+    // null means "inherit the default", which is what empties the entry.
+    const r = await setCompanyPolicy("temp", { read_only: null });
     expect(r.rules).toEqual({});
     expect(await policyFor("temp")).toEqual({});
+  });
+
+  it("stores read_only:false so a deny-by-default company can be reopened", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "qbo-policy-reopen-"));
+    const file = path.join(dir, "qbo-policy.json");
+    await writeFile(file, JSON.stringify({ defaults: { read_only: true }, companies: {} }));
+    process.env.QBO_POLICY_FILE = file;
+
+    // Deny-by-default: a company nobody has configured is closed.
+    await expect(checkWritePolicy("fresh", null)).rejects.toThrow(/read-only/);
+
+    // Explicitly allowing must survive the write, not be deleted back into the
+    // default. Deleting it here is what made default-deny a one-way door.
+    const r = await setCompanyPolicy("fresh", { read_only: false });
+    expect(r.rules).toEqual({ read_only: false });
+    expect(await policyFor("fresh")).toMatchObject({ read_only: false });
+    await expect(checkWritePolicy("fresh", { TotalAmt: 1 })).resolves.toBeUndefined();
+
+    // And inheriting again re-closes it.
+    await setCompanyPolicy("fresh", { read_only: null });
+    await expect(checkWritePolicy("fresh", null)).rejects.toThrow(/read-only/);
   });
 
   it("rejects a malformed date rather than writing it", async () => {

@@ -8,6 +8,8 @@
     "start": "node src/index.js",
     "connect": "node src/index.js --connect",
     "connect:batch": "node src/index.js --connect-batch",
+    "connect:catcher": "node src/index.js --connect-catcher",
+    "connect:playground": "node src/index.js --connect-playground",
     "disconnect": "node src/index.js --disconnect",
     "test": "vitest run"
   },

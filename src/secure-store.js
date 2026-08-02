@@ -69,10 +69,13 @@ async function keyFromMacKeychain() {
     throw new Error("keychain item is not a 32-byte hex key");
   } catch {
     const key = randomBytes(32);
-    await execFileP("security", [
-      "add-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account,
-      "-w", key.toString("hex"), "-U",
-    ]);
+    // The key travels on stdin (`security -i` reads commands from stdin),
+    // never on argv, so it cannot surface in a process listing even for the
+    // milliseconds the one-time creation takes.
+    const p = execFileP("security", ["-i"]);
+    p.child.stdin.write(`add-generic-password -s ${KEYCHAIN_SERVICE} -a ${account} -w ${key.toString("hex")} -U\n`);
+    p.child.stdin.end();
+    await p;
     log("Created token encryption key in the macOS Keychain.");
     return key;
   }
@@ -82,6 +85,16 @@ async function runPowershell(command) {
   const { stdout } = await execFileP("powershell.exe", [
     "-NoProfile", "-NonInteractive", "-Command", command,
   ]);
+  return stdout.trim();
+}
+
+// Same, but the script arrives on stdin ("-Command -"), for the one command
+// that carries key material: argv is visible in process listings, stdin is not.
+async function runPowershellStdin(script) {
+  const p = execFileP("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "-"]);
+  p.child.stdin.write(script + "\n");
+  p.child.stdin.end();
+  const { stdout } = await p;
   return stdout.trim();
 }
 
@@ -96,7 +109,7 @@ async function keyFromWindowsDpapi() {
     throw new Error("DPAPI blob did not decode to a 32-byte hex key");
   } catch {
     const key = randomBytes(32);
-    const blob = await runPowershell(
+    const blob = await runPowershellStdin(
       "Add-Type -AssemblyName System.Security; " +
       `[Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes('${key.toString("hex")}'), $null, 'CurrentUser'))`
     );

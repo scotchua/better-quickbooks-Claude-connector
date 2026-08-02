@@ -72,10 +72,20 @@ Adding several at once? Use the batch flow (log in once, pick + Allow each):
 cd "$PROJECT_DIR" && npm run connect:batch
 ```
 
-For production, override environment (and keys if `.env` holds sandbox keys)
-for just this run:
+**Production companies cannot use the localhost flow** (Intuit rejects
+localhost redirect URIs outside the development environment). Use either
+working path; both verify the landed company and store tokens encrypted:
+
 ```bash
-cd "$PROJECT_DIR" && QBO_COMPANY=<slug> QBO_ENVIRONMENT=production npm run connect
+# A. Hosted catcher page (paste back the one-time code it shows):
+cd "$PROJECT_DIR" && npm run connect:catcher -- <slug>
+
+# B. Intuit's OAuth 2.0 Playground (paste back Realm ID + Refresh Token,
+#    input hidden; every hop stays on Intuit-hosted pages). One-time setup:
+#    add https://developer.intuit.com/v2/OAuth2Playground/RedirectUrl as a
+#    Redirect URI on the app's PRODUCTION keys page, and in the playground
+#    pick the SAME app whose keys are in this project's .env.
+cd "$PROJECT_DIR" && npm run connect:playground -- <slug>
 ```
 
 The connect flow tries to auto-open the browser, but don't rely on that alone.
