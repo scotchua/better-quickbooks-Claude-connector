@@ -2,8 +2,16 @@ node_modules/
 
 # Secrets — never commit
 .env
+.env.bak*
+.env.*.bak
 tokens*.json
 .qbo-key*
+
+# Write guardrails (local, names clients). policy.js writes timestamped
+# backups as qbo-policy.json.bak-<stamp>, so the glob must be open-ended.
+qbo-policy.json
+qbo-policy.json.bak*
+qbo-policy.*.tmp
 
 # Local records (write audit log, CSV import journal)
 audit-log/
