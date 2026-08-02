@@ -159,6 +159,41 @@ if (process.argv.includes("--connect-batch")) {
   }
 }
 
+// ---- Token broker: hand a fresh access token to another local process ------
+// `node src/index.js --access-token <slug>` prints
+// {"slug","realmId","environment","access_token","expires_at"} on stdout and
+// nothing else, so a sibling tool can read it with one JSON.parse.
+//
+// This exists so there is exactly ONE process that ever calls Intuit's refresh
+// endpoint. Intuit rotates the refresh token on every use and invalidates the
+// previous one, so two stores refreshing the same realm independently will
+// eventually knock each other offline. The Python services under
+// ~/Claude/qbo-collector call this instead of holding their own tokens.
+//
+// Logs go to stderr (as everywhere else in this file), never stdout.
+if (process.argv.includes("--access-token")) {
+  const i = process.argv.indexOf("--access-token");
+  const next = process.argv[i + 1];
+  const slug = next && !next.startsWith("--") ? next : process.env.QBO_COMPANY || "";
+  try {
+    // allowInteractive stays false: a broker call must never try to open a
+    // browser. A missing or 100-day-expired token is an error the caller
+    // surfaces, with the re-authorize command in the message.
+    const t = await getValidTokens(slug);
+    process.stdout.write(JSON.stringify({
+      slug: sanitizeSlug(slug),
+      realmId: t.realmId,
+      environment: t.environment,
+      access_token: t.access_token,
+      expires_at: t.expires_at,
+    }) + "\n");
+    process.exit(0);
+  } catch (e) {
+    log("Access token request failed:", e.message);
+    process.exit(1);
+  }
+}
+
 // ---- Disconnect: revoke the grant, then remove the token file --------------
 // `npm run disconnect -- <slug>`. Offboarding a client is not complete until
 // the OAuth grant is revoked on Intuit's side; deleting the file alone would

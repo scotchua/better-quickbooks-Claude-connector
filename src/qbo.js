@@ -813,6 +813,7 @@ async function runBatchAuthorization({ shouldContinue } = {}) {
 export {
   credentials,
   getValidTokens,
+  saveTokens,
   qboRequest,
   qboQuery,
   qboRequestBinary,
