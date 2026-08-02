@@ -3174,6 +3174,60 @@ registerTool(
   })
 );
 
+/* =========================== MCP RESOURCES (2) =========================== */
+// Read-only context surfaces for MCP clients that support resources: the
+// client roster and the effective write policies. Same data the list_clients
+// and get_company_policy tools return, reachable without a tool call.
+
+server.resource(
+  "client-roster",
+  "qbo://clients",
+  { description: "The firm's client roster: every authorized company with names, aliases, engagement type, and drift.", mimeType: "application/json" },
+  async (uri) => ({
+    contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(await roster(), null, 2) }],
+  })
+);
+
+server.resource(
+  "write-policies",
+  "qbo://policy",
+  { description: "Effective write guardrails per company (read-only, amount cap, date floor).", mimeType: "application/json" },
+  async (uri) => {
+    const companies = await listCompanies();
+    const rows = [];
+    for (const c of companies) rows.push({ company: c.slug, rules: await policyFor(c.slug) });
+    return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify({ policy_file: policyPath(), companies: rows }, null, 2) }] };
+  }
+);
+
+/* ============================ MCP PROMPTS (1) ============================ */
+
+server.prompt(
+  "month-end-data-pack",
+  "Pull the standard month-end report package for one client into context: P&L (monthly columns), balance sheet, cash flow, trial balance, aged detail as of month end, and what changed since the prior close.",
+  { client: z.string().describe("Client slug or name"), month: z.string().describe("YYYY-MM") },
+  ({ client, month }) => ({
+    messages: [{
+      role: "user",
+      content: {
+        type: "text",
+        text: [
+          `Pull the month-end data pack for ${client}, period ${month}. Steps:`,
+          `1. resolve_client("${client}") and use the returned slug as the company argument on every call; never guess.`,
+          `2. get_preferences for fiscal year start and the book close date.`,
+          `3. get_profit_and_loss for the trailing 13 months ending ${month} with summarize_column_by="Month".`,
+          `4. get_balance_sheet as of the last day of ${month}.`,
+          `5. get_cash_flow for ${month}.`,
+          `6. get_trial_balance for ${month}.`,
+          `7. get_aged_receivables_detail and get_aged_payables_detail with report_date = last day of ${month} (use parent-level totals only; the response note explains).`,
+          `8. get_changes_since for Invoice,Bill,Payment,BillPayment,JournalEntry since the 1st of ${month} if within 30 days.`,
+          `Then summarize: cash, A/R and A/P ties, month-over-month P&L movements above materiality, and anything posted into the closed period. Every figure names its report. No em dashes.`,
+        ].join("\n"),
+      },
+    }],
+  })
+);
+
 // ---- start -----------------------------------------------------------------
 const transport = new StdioServerTransport();
 await server.connect(transport);
