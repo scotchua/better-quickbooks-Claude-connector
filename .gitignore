@@ -2,6 +2,8 @@ node_modules/
 
 # Secrets — never commit
 .env
+.env.*
+!.env.example
 tokens*.json
 .qbo-key*
 
@@ -18,6 +20,8 @@ save-excels-here/
 .DS_Store
 __pycache__/
 
-# Client roster (local labels, includes client names)
+# Client roster and per-client guardrails (hold client names and slugs)
 clients.json
 clients.json.bak
+qbo-policy.json
+qbo-policy.json.bak-*
