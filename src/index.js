@@ -632,11 +632,16 @@ registerTool(
 
 registerTool(
   "get_balance_sheet",
-  "Balance Sheet report for a date range (YYYY-MM-DD).",
-  { start_date: z.string(), end_date: z.string(), company: companyArg },
+  "Balance Sheet as of end_date (YYYY-MM-DD). A balance sheet is point-in-time, so start_date is optional and only shapes the Net Income row; omit it to run as of end_date.",
+  {
+    end_date: z.string().describe("YYYY-MM-DD, the as-of date"),
+    start_date: z.string().optional().describe("YYYY-MM-DD, only shapes the Net Income row; defaults to end_date"),
+    company: companyArg,
+  },
   tool(async ({ start_date, end_date, company }) => {
     const c = await resolveCompany(company);
-    return asText(await qboRequest(`/reports/BalanceSheet?start_date=${start_date}&end_date=${end_date}`, { company: c }));
+    const from = start_date || end_date;
+    return asText(await qboRequest(`/reports/BalanceSheet?start_date=${from}&end_date=${end_date}`, { company: c }));
   })
 );
 
@@ -1799,10 +1804,12 @@ function nameSearchTool(toolName, entity, plural, nameField, extraDesc = "", fil
       filters: filtersArg(filterFields),
       order_by: z.enum(filterFields).optional().describe("Sort field (defaults to the name)"),
       descending: z.boolean().optional(),
+      limit: z.number().int().min(1).optional()
+        .describe("Cap the rows returned. `count` still reports the full match total, so limit 1 answers \"how many are there\" without listing them."),
       verbose: verboseArg,
       company: companyArg,
     },
-    tool(async ({ term, include_inactive, filters, order_by, descending, verbose, company }) => {
+    tool(async ({ term, include_inactive, filters, order_by, descending, limit, verbose, company }) => {
       const c = await resolveCompany(company);
       const where = [];
       if (term) where.push(`${nameField} LIKE '%${esc(term)}%'`);
@@ -1810,7 +1817,19 @@ function nameSearchTool(toolName, entity, plural, nameField, extraDesc = "", fil
       if (filters?.length) where.push(...buildWhere(filters, filterFields));
       const sql = `SELECT * FROM ${entity}${where.length ? " WHERE " + where.join(" AND ") : ""} ORDERBY ${order_by || nameField}${descending ? " DESC" : ""}`;
       const { rows, truncated } = await qboQueryAll(sql, entity, { company: c });
-      return asText({ count: rows.length, truncated, [plural]: compactList(entity, rows, verbose) });
+      // `count` stays the full match total and `truncated` keeps its own meaning
+      // (the 1000-row ceiling in qboQueryAll). The cap is applied after, so a
+      // caller that only needs the size of a list can ask for one row and still
+      // read an accurate count. Client onboarding does exactly that when it
+      // sizes up a chart of accounts.
+      const shown = limit === undefined ? rows : rows.slice(0, limit);
+      return asText({
+        count: rows.length,
+        returned: shown.length,
+        truncated,
+        ...(shown.length < rows.length ? { limited: true } : {}),
+        [plural]: compactList(entity, shown, verbose),
+      });
     })
   );
 }
