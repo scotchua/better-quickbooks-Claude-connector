@@ -124,6 +124,31 @@ if (process.argv.includes("--connect-catcher")) {
   }
 }
 
+// ---- Production authorization via Intuit's OAuth Playground ----------------
+// `node src/index.js --connect-playground <slug> [--sandbox] [--no-browser]`
+//
+// Alternative to the catcher that keeps every hop on Intuit-hosted pages: the
+// operator mints tokens in the OAuth 2.0 Playground and pastes the refresh
+// token + realm back here (input hidden). See src/connect-playground.js.
+if (process.argv.includes("--connect-playground")) {
+  const i = process.argv.indexOf("--connect-playground");
+  const next = process.argv[i + 1];
+  const slug = next && !next.startsWith("--") ? next : process.env.QBO_COMPANY || "";
+  const environment = process.argv.includes("--sandbox") ? "sandbox" : "production";
+  try {
+    const { connectViaPlayground } = await import("./connect-playground.js");
+    const r = await connectViaPlayground(slug, environment, { openBrowserWindow: !process.argv.includes("--no-browser") });
+    log(`Authorized "${r.slug}" → ${r.company_name ?? "(name unread)"} (realm ${r.realmId}, ${r.environment}).`);
+    if (r.warning) log(r.warning);
+    if (r.duplicate_slugs) log(`WARNING: realm ${r.realmId} is also authorized as: ${r.duplicate_slugs.join(", ")}`);
+    process.stdout.write(JSON.stringify(r, null, 2) + "\n");
+    process.exit(0);
+  } catch (e) {
+    log("Authorization failed:", e.message);
+    process.exit(1);
+  }
+}
+
 // ---- Pattern A: sequential batch authorization ----------------------------
 // `npm run connect:batch`            → keep going, asking "add another?" after each
 // `npm run connect:batch -- --count 50` → authorize exactly 50, no prompts

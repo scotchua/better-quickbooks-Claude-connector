@@ -11,6 +11,11 @@ authorization. Hosting it on infrastructure the firm controls removes a
 third party from that path. This is trust-surface reduction, not an active
 vulnerability fix.
 
+Alternative that makes hosting unnecessary: `npm run connect:playground`
+imports tokens minted in Intuit's own OAuth 2.0 Playground, keeping every hop
+on Intuit-hosted pages. If the firm standardizes on that path, this page only
+needs to exist as a fallback and deploying it becomes optional.
+
 ## Deploy (pick one, ~10 minutes)
 
 - GitHub Pages: push this folder to a repo the firm owns, enable Pages, note

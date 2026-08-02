@@ -35,6 +35,28 @@ npm run connect:batch -- --count 50      # fixed number
 A browser opens → log in to the QuickBooks company → **Allow**. Tokens are saved
 locally and auto-refresh (~100 days).
 
+**Production companies** (Intuit rejects localhost redirect URIs outside the
+development environment) — two supported paths, pick either:
+
+```bash
+# A. Hosted catcher page: Intuit redirects to a static page that shows the
+#    one-time code; paste it back. Page location is QBO_CATCHER_REDIRECT_URI
+#    (see docs/oauth-catcher/ to host it on firm infrastructure).
+npm run connect:catcher -- <slug>
+
+# B. Intuit's own OAuth 2.0 Playground: mint tokens on developer.intuit.com,
+#    paste the Realm ID and Refresh Token back (input hidden). No non-Intuit
+#    hosting anywhere in the path. One-time setup: add
+#    https://developer.intuit.com/v2/OAuth2Playground/RedirectUrl
+#    as a Redirect URI on the app's production keys page.
+npm run connect:playground -- <slug>
+```
+
+Both verify the landed company's name afterward and store tokens encrypted.
+For comparison, Intuit's own MCP server solves the same restriction with an
+ngrok tunnel; that path is deliberately not used here (per-session URLs, a
+third-party tunnel in the auth path).
+
 The easiest way to add companies is the bundled **`add-qbo-company` skill** (see
 below) — it runs the connect flow, registers the connector, and validates both.
 
