@@ -111,8 +111,12 @@ export async function setCompanyPolicy(slug, { read_only, max_write_amount, min_
 
   const companies = (policy.companies ??= {});
   const entry = (companies[slug] ??= {});
+  // false must be STORED, not deleted. Deleting it makes the company fall back
+  // to defaults.read_only, so under a deny-by-default policy a company could be
+  // locked but never reopened. null is the way to say "inherit the default".
   if (read_only === true) entry.read_only = true;
-  if (read_only === false || read_only === null) delete entry.read_only;
+  else if (read_only === false) entry.read_only = false;
+  else if (read_only === null) delete entry.read_only;
   if (typeof max_write_amount === "number" && max_write_amount > 0) entry.max_write_amount = max_write_amount;
   if (max_write_amount === null || max_write_amount === 0) delete entry.max_write_amount;
   if (typeof min_txn_date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(min_txn_date)) entry.min_txn_date = min_txn_date;

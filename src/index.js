@@ -562,7 +562,8 @@ registerTool(
   "Set the write guardrail for one company: make it read-only, cap the size of a single write, or refuse writes dated before a floor. Takes effect immediately with no restart, and leaves other companies' rules alone. Use read_only when onboarding, during a diagnostic engagement, or any time a client's books should not be posted to.",
   {
     company: z.string().describe("Company slug the rule applies to"),
-    read_only: z.boolean().optional().describe("true refuses all writes; false lifts it"),
+    read_only: z.union([z.boolean(), z.literal("inherit")]).optional()
+      .describe("true refuses all writes; false explicitly allows them, which is what reopens a company when the file denies writes by default; \"inherit\" drops the company's own setting and falls back to the default"),
     max_write_amount: z.number().min(0).optional().describe("Refuse writes above this total; 0 removes the cap"),
     min_txn_date: z.string().optional().describe("YYYY-MM-DD floor for transaction dates; \"clear\" removes it"),
   },
@@ -577,14 +578,22 @@ registerTool(
       throw new Error("Nothing to change. Pass read_only, max_write_amount, or min_txn_date.");
     }
     const r = await setCompanyPolicy(slug, {
-      read_only,
+      read_only: read_only === "inherit" ? null : read_only,
       max_write_amount,
       min_txn_date: min_txn_date === "clear" ? null : min_txn_date,
     });
+    // "No restrictions" has to mean the effective policy, not the company's own
+    // entry: read_only:false is a rule, and an empty entry still inherits the
+    // file's defaults. Report what actually applies.
+    const effectivePolicy = await policyFor(slug);
+    const restricted = effectivePolicy.read_only
+      || effectivePolicy.max_write_amount != null
+      || effectivePolicy.min_txn_date != null;
     return asText({
       ...r,
+      effective_policy: effectivePolicy,
       effective: "Immediately. The connector re-reads this file on every write.",
-      note: Object.keys(r.rules).length === 0 ? "No restrictions remain for this company." : undefined,
+      note: restricted ? undefined : "No restrictions apply to this company.",
     });
   })
 );
