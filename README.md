@@ -290,3 +290,17 @@ Stuck on a step or seeing an error? Tell Claude (Code or Desktop) exactly what
 happened. It can re-check the connection, re-authorize a company, or walk the
 setup again with you. The `health_check` tool is the fastest first step: it
 verifies every connected company's tokens and API access in one call.
+
+---
+
+## License and lineage
+
+Apache License 2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE)), the same
+license as Intuit's official
+[quickbooks-online-mcp-server](https://github.com/intuit/quickbooks-online-mcp-server),
+whose design patterns this project adopted. The original connector was built
+by Isaac (Opzer) and is extended here with his permission.
+
+Fork it, modify it, run it at your firm. If you make it better, please send
+the improvement back as a pull request or an issue (see
+[CONTRIBUTING.md](CONTRIBUTING.md)) so every firm using it benefits.
