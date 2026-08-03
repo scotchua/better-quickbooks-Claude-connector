@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>QBO OAuth Catcher</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", sans-serif; max-width: 40rem; margin: 4rem auto; padding: 0 1.5rem; color: #282626; }
+  h1 { font-size: 1.3rem; }
+  code, textarea { font-family: ui-monospace, Menlo, monospace; font-size: 0.85rem; }
+  textarea { width: 100%; height: 5.5rem; padding: 0.6rem; border: 1px solid #ccc; border-radius: 6px; }
+  button { margin-top: 0.6rem; padding: 0.5rem 1.1rem; border: 0; border-radius: 6px; background: #7F2536; color: #fff; font-size: 0.95rem; cursor: pointer; }
+  button:active { background: #451620; }
+  .ok { color: #3A7D7B; font-weight: 600; }
+  .err { color: #7F2536; font-weight: 600; }
+  p.small { color: #5A5654; font-size: 0.85rem; }
+</style>
+</head>
+<body>
+<h1>QuickBooks authorization caught</h1>
+<p id="status">Reading the redirect...</p>
+<textarea id="line" readonly aria-label="authorization line"></textarea>
+<button id="copy" type="button">Copy to clipboard</button>
+<p class="small">Paste this line back into the terminal that asked for it
+(<code>npm run connect:catcher</code>). The code is single-use, expires in
+minutes, and is useless without the app's client secret. This page stores
+nothing and sends nothing anywhere; you can close it after copying.</p>
+<script>
+  (function () {
+    var qs = window.location.search.replace(/^\?/, "");
+    var p = new URLSearchParams(qs);
+    var status = document.getElementById("status");
+    var line = document.getElementById("line");
+    if (p.get("error")) {
+      status.innerHTML = '<span class="err">Intuit returned an error: ' +
+        p.get("error").replace(/[<>&]/g, "") + '</span>';
+      line.value = qs;
+    } else if (p.get("code") && p.get("realmId")) {
+      status.innerHTML = '<span class="ok">Success.</span> Copy the line below and paste it into the terminal.';
+      line.value = qs;
+    } else {
+      status.innerHTML = '<span class="err">No authorization data in this URL.</span> Start over from the terminal.';
+      line.value = "";
+    }
+    document.getElementById("copy").addEventListener("click", function () {
+      line.select();
+      navigator.clipboard.writeText(line.value).then(function () {
+        status.innerHTML = '<span class="ok">Copied.</span> Return to the terminal and paste.';
+      }, function () {
+        document.execCommand("copy");
+      });
+    });
+  })();
+</script>
+</body>
+</html>
