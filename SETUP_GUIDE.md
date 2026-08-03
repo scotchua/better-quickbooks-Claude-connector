@@ -128,6 +128,41 @@ If you get numbers back, you're done.
 
 ---
 
+## Configuring Claude Desktop
+
+Only needed if you are wiring the connector up by hand instead of letting
+`/add-qbo-company` do it, or if Claude Desktop shows the connector as
+disconnected.
+
+The config file lives at:
+
+- **Mac:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+
+Start from `claude_desktop_config.snippet.json` in this folder, and replace
+**both** values. They are placeholders, specific to each machine, and using them
+unchanged fails with "server disconnected":
+
+| Field | How to find it | Why it differs per machine |
+|---|---|---|
+| `command` | `which node` (Mac) or `where node` (Windows) | nvm, Homebrew, Volta, and system Node all install elsewhere |
+| `args[0]` | run `pwd` in this folder, then add `/src/index.js` | depends where you unzipped it |
+
+Four things that trip people up:
+
+- Both paths must be **absolute**. A bare `"node"` fails, because Claude Desktop
+  starts the server without your shell's `PATH`.
+- On Windows, double every backslash in JSON:
+  `C:\\Users\\you\\qbo-mcp-server\\src\\index.js`.
+- If your download produced a folder like `...-main-2`, or you renamed it, the
+  path has to match the folder that actually exists on disk.
+- Restart Claude Desktop completely afterward (Mac: `Cmd + Q`; Windows: quit from
+  the system tray, not just the window).
+
+**Setting this up with Claude?** Tell it to run `which node` and `pwd` in this
+folder and use those actual results. An assistant that reuses the placeholder
+paths, or a path it saw in these docs, produces a config that cannot start.
+
 ## Adding more clients later
 
 Open Claude Code in the same folder and say:

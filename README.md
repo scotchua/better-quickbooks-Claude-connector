@@ -263,6 +263,25 @@ connector that serves every company you connect, now or later, and checks that
 it worked. (If you'd rather do it by hand, see *Setup (quick reference)* in
 DEVELOPER.md.) After this one-time step, adding more companies needs no restart.
 
+> **Both values in `claude_desktop_config.snippet.json` are placeholders.** They
+> are specific to your machine, and copying them as-is fails with "server
+> disconnected." Find yours:
+>
+> | Field | How to find it | Why it differs per machine |
+> |---|---|---|
+> | `command` | `which node` (Mac) or `where node` (Windows) | nvm, Homebrew, Volta, and system Node all install elsewhere |
+> | `args[0]` | run `pwd` in this folder, then add `/src/index.js` | depends where you unzipped it |
+>
+> Both must be **absolute**. A bare `"node"` fails, because Claude Desktop starts
+> the server without your shell's `PATH`. On Windows, double every backslash in
+> JSON. If your download produced a folder like `...-main-2`, or you renamed it,
+> the path has to match the folder that actually exists. Restart Claude Desktop
+> fully after editing.
+>
+> **Setting this up with Claude?** Tell it to run `which node` and `pwd` here and
+> use those results. An assistant that reuses the placeholder paths, or paths it
+> saw in these docs, produces a config that cannot start.
+
 **Step 8 — Restart Claude Desktop.**
 - **Mac:** Quit Claude Desktop completely (`Cmd + Q`), then open it again.
 - **Windows:** Right-click the Claude icon in the **system tray** (bottom-right,

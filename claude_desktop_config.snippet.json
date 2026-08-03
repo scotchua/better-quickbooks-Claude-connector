@@ -2,7 +2,7 @@
   "mcpServers": {
     "qbo": {
       "command": "/ABSOLUTE/PATH/TO/YOUR/node",
-      "args": ["/ABSOLUTE/PATH/TO/YOUR/better-quickbooks-Claude-connector/src/index.js"]
+      "args": ["/ABSOLUTE/PATH/TO/THIS/FOLDER/src/index.js"]
     }
   }
 }
