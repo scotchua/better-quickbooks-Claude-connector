@@ -19,7 +19,7 @@ import readline from "node:readline";
 import { exec } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { parse as parseQuery } from "node:querystring";
-import { exchangeCodeForTokens, saveTokens, sanitizeSlug, qboRequest, listCompanies } from "./qbo.js";
+import { credentials, exchangeCodeForTokens, saveTokens, sanitizeSlug, qboRequest, listCompanies } from "./qbo.js";
 
 const AUTHORIZE_URL = "https://appcenter.intuit.com/connect/oauth2";
 const SCOPE = "com.intuit.quickbooks.accounting";
@@ -75,6 +75,11 @@ export async function connectViaCatcher(slug, environment = "production") {
   // request's byte for byte. Setting it here keeps the two in step without
   // asking the operator to edit .env for a one-off.
   process.env.QBO_REDIRECT_URI = redirectUri;
+
+  // Fail before opening a browser. Without this, missing keys produce an
+  // authorize URL carrying an empty client_id, so the operator is sent to an
+  // Intuit error page and asked to paste something they can never get.
+  credentials();
 
   const existing = (await listCompanies()).find((c) => c.slug === clean);
   if (existing) {

@@ -119,3 +119,21 @@ export function flagGlRows(rows) {
     return flags.length ? { ...r, flags } : r;
   });
 }
+
+
+// One-line receipt for a report written to disk instead of returned inline.
+// Pure so it is testable; the caller owns the filesystem. The header line matters:
+// it is how the reader confirms the file on disk is the window, basis and
+// breakdown they asked for, without opening it.
+export function reportReceipt(report, dest, bytes) {
+  const h = (report && report.Header) || {};
+  const desc = [
+    h.ReportName,
+    h.StartPeriod ? `${h.StartPeriod} to ${h.EndPeriod}` : null,
+    h.ReportBasis,
+    h.SummarizeColumnsBy ? `by ${h.SummarizeColumnsBy}` : null,
+  ]
+    .filter(Boolean)
+    .join(" \u00b7 ");
+  return `Saved ${Number(bytes).toLocaleString()} bytes to ${dest}${desc ? `\n${desc}` : ""}`;
+}

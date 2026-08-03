@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { flattenReport, toNumber, consolidateReports, glFlatten, flagGlRows } from "../src/reports.js";
+import { flattenReport, toNumber, consolidateReports, glFlatten, flagGlRows, reportReceipt } from "../src/reports.js";
 
 const pnl = (income, rentName, rentAmt) => ({
   Columns: { Column: [{ ColTitle: "", ColType: "Account" }, { ColTitle: "Total", ColType: "Money" }] },
@@ -90,5 +90,41 @@ describe("glFlatten + flags", () => {
     const [je, coffee] = flagGlRows(glFlatten(flattenReport(gl)));
     expect(je.flags).toEqual(expect.arrayContaining(["weekend", "round_amount", "large", "journal_entry"]));
     expect(coffee.flags).toBeUndefined();
+  });
+});
+
+describe("reportReceipt", () => {
+  const hdr = {
+    Header: {
+      ReportName: "ProfitAndLoss",
+      StartPeriod: "2025-02-01",
+      EndPeriod: "2026-07-31",
+      ReportBasis: "Accrual",
+      SummarizeColumnsBy: "Month",
+    },
+  };
+
+  it("names the file, the size and enough of the header to confirm the window", () => {
+    const out = reportReceipt(hdr, "/tmp/pl.json", 157900);
+    expect(out).toContain("/tmp/pl.json");
+    expect(out).toContain("157,900 bytes");
+    expect(out).toContain("ProfitAndLoss");
+    expect(out).toContain("2025-02-01 to 2026-07-31");
+    expect(out).toContain("Accrual");
+    expect(out).toContain("by Month");
+  });
+
+  it("degrades to just the file line when the report carries no header", () => {
+    expect(reportReceipt({}, "/tmp/x.json", 12)).toBe("Saved 12 bytes to /tmp/x.json");
+    expect(reportReceipt(null, "/tmp/x.json", 12)).toBe("Saved 12 bytes to /tmp/x.json");
+  });
+
+  it("omits header parts the report does not carry", () => {
+    const out = reportReceipt({ Header: { ReportName: "AgedReceivables" } }, "/tmp/ar.json", 5);
+    const [fileLine, descLine] = out.split("\n");
+    expect(fileLine).toBe("Saved 5 bytes to /tmp/ar.json");
+    expect(descLine).toBe("AgedReceivables");   // no empty period or basis fragments trailing it
+    expect(out).not.toContain("undefined");
+    expect(out).not.toContain("null");
   });
 });

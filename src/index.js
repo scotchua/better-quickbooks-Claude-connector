@@ -79,7 +79,7 @@ import {
 } from "./lines.js";
 import { compactList } from "./compact.js";
 import { parseCSV, planImport, importId, rowMarker, postedRows, recordPosted } from "./csv.js";
-import { flattenReport, consolidateReports, glFlatten, flagGlRows } from "./reports.js";
+import { flattenReport, consolidateReports, glFlatten, flagGlRows, reportReceipt } from "./reports.js";
 import { matchTransactions, findDuplicateGroups } from "./reconcile.js";
 import { checkWritePolicy, policyFor, setCompanyPolicy, policyPath } from "./policy.js";
 import { roster, resolveClient, registerClient, clientsPath } from "./clients.js";
@@ -295,6 +295,19 @@ function tool(handler) {
   };
 }
 
+// Report payloads are large: an 18-month monthly P&L runs past 150KB. When the
+// caller names save_path the JSON is written there and only a short receipt comes
+// back, so a downstream script reads the file and the payload never has to travel
+// through the conversation. Omit save_path and behaviour is exactly as before.
+async function reportResult(obj, save_path) {
+  if (!save_path) return asText(obj);
+  const dest = resolveUserPath(save_path, { purpose: "write" });
+  await mkdir(path.dirname(dest), { recursive: true });
+  const text = JSON.stringify(obj, null, 2);
+  await writeFile(dest, text);
+  return asText(reportReceipt(obj, dest, text.length));
+}
+
 // Build a QBO report query string from a params object, dropping empties.
 function reportQuery(params) {
   const qs = Object.entries(params)
@@ -319,6 +332,8 @@ const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD");
 
 const accountingMethodArg = z.enum(["Cash", "Accrual"]).optional().describe("Cash or Accrual (defaults to the company setting)");
 const dateMacroArg = z.string().optional().describe("QBO date macro, e.g. \"This Fiscal Year\", \"Last Month\" (alternative to start/end dates)");
+const savePathArg = z.string().optional()
+  .describe("Write the report JSON to this path and return a short receipt instead of the full payload. Use it for anything a script will read (an 18-month monthly P&L exceeds 150KB); the file also gives the downstream work a dated artifact to cite.");
 const summarizeColumnArg = z.string().optional()
   .describe("Break columns out by e.g. \"Month\", \"Quarter\", \"Year\", \"Classes\", \"Departments\", \"Customers\", \"Vendors\"");
 
@@ -722,12 +737,13 @@ registerTool(
     accounting_method: accountingMethodArg,
     summarize_column_by: summarizeColumnArg,
     date_macro: dateMacroArg,
+    save_path: savePathArg,
     company: companyArg,
   },
-  tool(async ({ start_date, end_date, accounting_method, summarize_column_by, date_macro, company }) => {
+  tool(async ({ start_date, end_date, accounting_method, summarize_column_by, date_macro, save_path, company }) => {
     const c = await resolveCompany(company);
     const q = reportQuery({ start_date, end_date, accounting_method, summarize_column_by, date_macro });
-    return asText(await qboRequest(`/reports/ProfitAndLoss${q}`, { company: c }));
+    return reportResult(await qboRequest(`/reports/ProfitAndLoss${q}`, { company: c }), save_path);
   })
 );
 
@@ -740,12 +756,13 @@ registerTool(
     accounting_method: accountingMethodArg,
     date_macro: dateMacroArg,
     columns: z.string().optional().describe("Comma-separated columns, e.g. \"tx_date,txn_type,doc_num,name,memo,subt_nat_amount\""),
+    save_path: savePathArg,
     company: companyArg,
   },
-  tool(async ({ start_date, end_date, accounting_method, date_macro, columns, company }) => {
+  tool(async ({ start_date, end_date, accounting_method, date_macro, columns, save_path, company }) => {
     const c = await resolveCompany(company);
     const q = reportQuery({ start_date, end_date, accounting_method, date_macro, columns });
-    return asText(await qboRequest(`/reports/ProfitAndLossDetail${q}`, { company: c }));
+    return reportResult(await qboRequest(`/reports/ProfitAndLossDetail${q}`, { company: c }), save_path);
   })
 );
 
@@ -757,13 +774,14 @@ registerTool(
     start_date: isoDate.optional().describe("YYYY-MM-DD, only shapes the Net Income row; defaults to end_date"),
     accounting_method: accountingMethodArg,
     summarize_column_by: summarizeColumnArg,
+    save_path: savePathArg,
     company: companyArg,
   },
-  tool(async ({ start_date, end_date, accounting_method, summarize_column_by, company }) => {
+  tool(async ({ start_date, end_date, accounting_method, summarize_column_by, save_path, company }) => {
     const c = await resolveCompany(company);
     const from = start_date || end_date;
     const q = reportQuery({ start_date: from, end_date, accounting_method, summarize_column_by });
-    return asText(await qboRequest(`/reports/BalanceSheet${q}`, { company: c }));
+    return reportResult(await qboRequest(`/reports/BalanceSheet${q}`, { company: c }), save_path);
   })
 );
 
@@ -775,12 +793,13 @@ registerTool(
     end_date: isoDate.describe("YYYY-MM-DD"),
     summarize_column_by: summarizeColumnArg,
     date_macro: dateMacroArg,
+    save_path: savePathArg,
     company: companyArg,
   },
-  tool(async ({ start_date, end_date, summarize_column_by, date_macro, company }) => {
+  tool(async ({ start_date, end_date, summarize_column_by, date_macro, save_path, company }) => {
     const c = await resolveCompany(company);
     const q = reportQuery({ start_date, end_date, summarize_column_by, date_macro });
-    return asText(await qboRequest(`/reports/CashFlow${q}`, { company: c }));
+    return reportResult(await qboRequest(`/reports/CashFlow${q}`, { company: c }), save_path);
   })
 );
 
@@ -799,12 +818,13 @@ registerTool(
     report_date: isoDate.optional().describe("As-of date (YYYY-MM-DD); omit for today"),
     aging_method: agingMethodArg,
     date_macro: dateMacroArg,
+    save_path: savePathArg,
     company: companyArg,
   },
-  tool(async ({ report_date, aging_method, date_macro, company }) => {
+  tool(async ({ report_date, aging_method, date_macro, save_path, company }) => {
     const c = await resolveCompany(company);
     const rep = await qboRequest(`/reports/AgedReceivables${reportQuery({ report_date, aging_method, date_macro })}`, { company: c });
-    return asText({ note: AGING_ROLLUP_NOTE, ...rep });
+    return reportResult({ note: AGING_ROLLUP_NOTE, ...rep }, save_path);
   })
 );
 
@@ -815,12 +835,13 @@ registerTool(
     report_date: isoDate.optional().describe("As-of date (YYYY-MM-DD); omit for today"),
     aging_method: agingMethodArg,
     date_macro: dateMacroArg,
+    save_path: savePathArg,
     company: companyArg,
   },
-  tool(async ({ report_date, aging_method, date_macro, company }) => {
+  tool(async ({ report_date, aging_method, date_macro, save_path, company }) => {
     const c = await resolveCompany(company);
     const rep = await qboRequest(`/reports/AgedReceivableDetail${reportQuery({ report_date, aging_method, date_macro })}`, { company: c });
-    return asText({ note: AGING_ROLLUP_NOTE, ...rep });
+    return reportResult({ note: AGING_ROLLUP_NOTE, ...rep }, save_path);
   })
 );
 
@@ -831,12 +852,13 @@ registerTool(
     report_date: isoDate.optional().describe("As-of date (YYYY-MM-DD); omit for today"),
     aging_method: agingMethodArg,
     date_macro: dateMacroArg,
+    save_path: savePathArg,
     company: companyArg,
   },
-  tool(async ({ report_date, aging_method, date_macro, company }) => {
+  tool(async ({ report_date, aging_method, date_macro, save_path, company }) => {
     const c = await resolveCompany(company);
     const rep = await qboRequest(`/reports/AgedPayables${reportQuery({ report_date, aging_method, date_macro })}`, { company: c });
-    return asText({ note: AGING_ROLLUP_NOTE, ...rep });
+    return reportResult({ note: AGING_ROLLUP_NOTE, ...rep }, save_path);
   })
 );
 
@@ -847,12 +869,13 @@ registerTool(
     report_date: isoDate.optional().describe("As-of date (YYYY-MM-DD); omit for today"),
     aging_method: agingMethodArg,
     date_macro: dateMacroArg,
+    save_path: savePathArg,
     company: companyArg,
   },
-  tool(async ({ report_date, aging_method, date_macro, company }) => {
+  tool(async ({ report_date, aging_method, date_macro, save_path, company }) => {
     const c = await resolveCompany(company);
     const rep = await qboRequest(`/reports/AgedPayableDetail${reportQuery({ report_date, aging_method, date_macro })}`, { company: c });
-    return asText({ note: AGING_ROLLUP_NOTE, ...rep });
+    return reportResult({ note: AGING_ROLLUP_NOTE, ...rep }, save_path);
   })
 );
 
@@ -975,12 +998,13 @@ registerTool(
     accounting_method: accountingMethodArg,
     date_macro: dateMacroArg,
     columns: z.string().optional().describe("Comma-separated columns to include, e.g. \"tx_date,account_name,debt_amt,credit_amt\""),
+    save_path: savePathArg,
     company: companyArg,
   },
-  tool(async ({ start_date, end_date, accounting_method, date_macro, columns, company }) => {
+  tool(async ({ start_date, end_date, accounting_method, date_macro, columns, save_path, company }) => {
     const c = await resolveCompany(company);
     const q = reportQuery({ start_date, end_date, accounting_method, date_macro, columns });
-    return asText(await qboRequest(`/reports/GeneralLedger${q}`, { company: c }));
+    return reportResult(await qboRequest(`/reports/GeneralLedger${q}`, { company: c }), save_path);
   })
 );
 
@@ -992,12 +1016,13 @@ registerTool(
     end_date: isoDate.optional().describe("YYYY-MM-DD"),
     accounting_method: accountingMethodArg,
     date_macro: dateMacroArg,
+    save_path: savePathArg,
     company: companyArg,
   },
-  tool(async ({ start_date, end_date, accounting_method, date_macro, company }) => {
+  tool(async ({ start_date, end_date, accounting_method, date_macro, save_path, company }) => {
     const c = await resolveCompany(company);
     const q = reportQuery({ start_date, end_date, accounting_method, date_macro });
-    return asText(await qboRequest(`/reports/TrialBalance${q}`, { company: c }));
+    return reportResult(await qboRequest(`/reports/TrialBalance${q}`, { company: c }), save_path);
   })
 );
 
@@ -1007,11 +1032,12 @@ registerTool(
   {
     report_date: isoDate.optional().describe("As-of date (YYYY-MM-DD); omit for today"),
     date_macro: dateMacroArg,
+    save_path: savePathArg,
     company: companyArg,
   },
-  tool(async ({ report_date, date_macro, company }) => {
+  tool(async ({ report_date, date_macro, save_path, company }) => {
     const c = await resolveCompany(company);
-    return asText(await qboRequest(`/reports/InventoryValuationSummary${reportQuery({ report_date, date_macro })}`, { company: c }));
+    return reportResult(await qboRequest(`/reports/InventoryValuationSummary${reportQuery({ report_date, date_macro })}`, { company: c }), save_path);
   })
 );
 
@@ -1023,11 +1049,12 @@ registerTool(
     end_date: isoDate.optional().describe("YYYY-MM-DD"),
     date_macro: dateMacroArg,
     accounting_method: accountingMethodArg,
+    save_path: savePathArg,
     company: companyArg,
   },
-  tool(async ({ start_date, end_date, date_macro, accounting_method, company }) => {
+  tool(async ({ start_date, end_date, date_macro, accounting_method, save_path, company }) => {
     const c = await resolveCompany(company);
-    return asText(await qboRequest(`/reports/ItemSales${reportQuery({ start_date, end_date, date_macro, accounting_method })}`, { company: c }));
+    return reportResult(await qboRequest(`/reports/ItemSales${reportQuery({ start_date, end_date, date_macro, accounting_method })}`, { company: c }), save_path);
   })
 );
 
@@ -1038,11 +1065,12 @@ registerTool(
     start_date: isoDate.optional().describe("YYYY-MM-DD"),
     end_date: isoDate.optional().describe("YYYY-MM-DD"),
     date_macro: dateMacroArg,
+    save_path: savePathArg,
     company: companyArg,
   },
-  tool(async ({ start_date, end_date, date_macro, company }) => {
+  tool(async ({ start_date, end_date, date_macro, save_path, company }) => {
     const c = await resolveCompany(company);
-    return asText(await qboRequest(`/reports/UnbilledTime${reportQuery({ start_date, end_date, date_macro })}`, { company: c }));
+    return reportResult(await qboRequest(`/reports/UnbilledTime${reportQuery({ start_date, end_date, date_macro })}`, { company: c }), save_path);
   })
 );
 
@@ -1055,12 +1083,13 @@ registerTool(
     date_macro: dateMacroArg,
     accounting_method: accountingMethodArg,
     transaction_type: z.string().optional().describe("Filter by type, e.g. Invoice, Bill, Payment, JournalEntry"),
+    save_path: savePathArg,
     company: companyArg,
   },
-  tool(async ({ start_date, end_date, date_macro, accounting_method, transaction_type, company }) => {
+  tool(async ({ start_date, end_date, date_macro, accounting_method, transaction_type, save_path, company }) => {
     const c = await resolveCompany(company);
     const q = reportQuery({ start_date, end_date, date_macro, accounting_method, transaction_type });
-    return asText(await qboRequest(`/reports/TransactionList${q}`, { company: c }));
+    return reportResult(await qboRequest(`/reports/TransactionList${q}`, { company: c }), save_path);
   })
 );
 
@@ -1073,12 +1102,13 @@ registerTool(
     date_macro: dateMacroArg,
     accounting_method: accountingMethodArg,
     vendor: z.string().optional().describe("Filter to a single vendor Id"),
+    save_path: savePathArg,
     company: companyArg,
   },
-  tool(async ({ start_date, end_date, date_macro, accounting_method, vendor, company }) => {
+  tool(async ({ start_date, end_date, date_macro, accounting_method, vendor, save_path, company }) => {
     const c = await resolveCompany(company);
     const q = reportQuery({ start_date, end_date, date_macro, accounting_method, vendor });
-    return asText(await qboRequest(`/reports/TransactionListByVendor${q}`, { company: c }));
+    return reportResult(await qboRequest(`/reports/TransactionListByVendor${q}`, { company: c }), save_path);
   })
 );
 
@@ -1091,12 +1121,13 @@ registerTool(
     date_macro: dateMacroArg,
     accounting_method: accountingMethodArg,
     customer: z.string().optional().describe("Filter to a single customer Id"),
+    save_path: savePathArg,
     company: companyArg,
   },
-  tool(async ({ start_date, end_date, date_macro, accounting_method, customer, company }) => {
+  tool(async ({ start_date, end_date, date_macro, accounting_method, customer, save_path, company }) => {
     const c = await resolveCompany(company);
     const q = reportQuery({ start_date, end_date, date_macro, accounting_method, customer });
-    return asText(await qboRequest(`/reports/TransactionListByCustomer${q}`, { company: c }));
+    return reportResult(await qboRequest(`/reports/TransactionListByCustomer${q}`, { company: c }), save_path);
   })
 );
 
@@ -1108,12 +1139,13 @@ registerTool(
     end_date: isoDate.optional().describe("YYYY-MM-DD"),
     date_macro: dateMacroArg,
     accounting_method: accountingMethodArg,
+    save_path: savePathArg,
     company: companyArg,
   },
-  tool(async ({ start_date, end_date, date_macro, accounting_method, company }) => {
+  tool(async ({ start_date, end_date, date_macro, accounting_method, save_path, company }) => {
     const c = await resolveCompany(company);
     const q = reportQuery({ start_date, end_date, date_macro, accounting_method });
-    return asText(await qboRequest(`/reports/TransactionListWithSplits${q}`, { company: c }));
+    return reportResult(await qboRequest(`/reports/TransactionListWithSplits${q}`, { company: c }), save_path);
   })
 );
 
@@ -2740,9 +2772,10 @@ registerTool(
     date_macro: dateMacroArg,
     accounting_method: accountingMethodArg,
     flags: z.boolean().optional().describe("Attach review-heuristic flags (default true)"),
+    save_path: savePathArg,
     company: companyArg,
   },
-  tool(async ({ start_date, end_date, date_macro, accounting_method, flags, company }) => {
+  tool(async ({ start_date, end_date, date_macro, accounting_method, flags, save_path, company }) => {
     const c = await resolveCompany(company);
     const q = reportQuery({
       start_date, end_date, date_macro, accounting_method,
@@ -2751,7 +2784,7 @@ registerTool(
     const rep = await qboRequest(`/reports/GeneralLedger${q}`, { company: c });
     let rows = glFlatten(flattenReport(rep));
     if (flags !== false) rows = flagGlRows(rows);
-    return asText({
+    return reportResult({
       count: rows.length,
       rows,
       ...(flags !== false ? { flag_meanings: {
@@ -2760,7 +2793,7 @@ registerTool(
         large: "absolute amount of 10,000 or more",
         journal_entry: "posted via journal entry",
       } } : {}),
-    });
+    }, save_path);
   })
 );
 
@@ -2830,11 +2863,12 @@ registerTool(
     end_date: isoDate.optional().describe("YYYY-MM-DD"),
     date_macro: dateMacroArg,
     accounting_method: accountingMethodArg,
+    save_path: savePathArg,
     company: companyArg,
   },
-  tool(async ({ start_date, end_date, date_macro, accounting_method, company }) => {
+  tool(async ({ start_date, end_date, date_macro, accounting_method, save_path, company }) => {
     const c = await resolveCompany(company);
-    return asText(await qboRequest(`/reports/CustomerSales${reportQuery({ start_date, end_date, date_macro, accounting_method })}`, { company: c }));
+    return reportResult(await qboRequest(`/reports/CustomerSales${reportQuery({ start_date, end_date, date_macro, accounting_method })}`, { company: c }), save_path);
   })
 );
 
@@ -2856,11 +2890,12 @@ registerTool(
     end_date: isoDate.optional().describe("YYYY-MM-DD"),
     date_macro: dateMacroArg,
     vendor: z.string().optional().describe("Limit to a single vendor Id"),
+    save_path: savePathArg,
     company: companyArg,
   },
-  tool(async ({ start_date, end_date, date_macro, vendor, company }) => {
+  tool(async ({ start_date, end_date, date_macro, vendor, save_path, company }) => {
     const c = await resolveCompany(company);
-    return asText(await qboRequest(`/reports/VendorExpenses${reportQuery({ start_date, end_date, date_macro, vendor })}`, { company: c }));
+    return reportResult(await qboRequest(`/reports/VendorExpenses${reportQuery({ start_date, end_date, date_macro, vendor })}`, { company: c }), save_path);
   })
 );
 

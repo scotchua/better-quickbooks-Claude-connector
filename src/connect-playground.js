@@ -153,9 +153,16 @@ export async function connectViaPlayground(slug, environment = "production", { o
   // Refresh immediately: proves the token belongs to this app, retrieves an
   // access token and real expiries, gives Intuit its rotation opportunity,
   // and persists the result encrypted (refreshTokens saves on success).
+  //
+  // force: true is load-bearing. Without it, re-authorizing a slug that still
+  // has a fresh access token on disk short-circuits and reports success for a
+  // paste that was never exchanged, and a slug with any token file would
+  // refresh using the ON-DISK token instead of the pasted one. Either way the
+  // import would validate nothing and import nothing.
   let tokens;
   try {
-    tokens = await refreshTokens(clean, { refresh_token, realmId: String(realmId), environment });
+    tokens = await refreshTokens(clean, { refresh_token, realmId: String(realmId), environment },
+                                { force: true });
   } catch (e) {
     throw new Error(
       `${e.message}\nMost common cause: the playground was run against a different app than the one in this project's .env, ` +

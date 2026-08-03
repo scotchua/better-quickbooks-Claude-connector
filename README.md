@@ -41,7 +41,12 @@ You do **not** need to know how to code. The setup below is copy-and-paste.
 ## What you can do
 
 - **Pull reports:** Profit & Loss, Balance Sheet, Cash Flow, Trial Balance,
-  General Ledger, A/R and A/P aging, overdue invoices.
+  General Ledger, A/R and A/P aging, overdue invoices. Every report tool takes an
+  optional `save_path`: name one and the JSON is written to that file and you get
+  back a one-line receipt naming the window, basis and breakdown, instead of the
+  whole payload. An 18-month monthly P&L runs past 150KB, so anything a script is
+  going to read belongs in a file, and the file doubles as the dated artifact the
+  downstream work cites.
 - **Enter and edit work:** customers, vendors, items, accounts, invoices, bills,
   bill payments, transfers, expenses, estimates, sales receipts, credit memos,
   payments, deposits, and journal entries, with class, location, and sales-tax

@@ -96,7 +96,8 @@ function credentials() {
 
   if (!QBO_CLIENT_ID || !QBO_CLIENT_SECRET) {
     throw new Error(
-      "Missing QBO_CLIENT_ID / QBO_CLIENT_SECRET. Fill them into your .env file (Step 7)."
+      "Missing QBO_CLIENT_ID / QBO_CLIENT_SECRET. Copy .env.example to .env and fill in your "
+      + "Intuit app keys (README Step 5), then run this again."
     );
   }
   return {
@@ -426,17 +427,35 @@ async function beginAuthorization({ company, environment, openBrowserWindow = tr
   return { authorize_url: authUrl, slug, environment: env, expires_in_seconds: Math.round(ttlMs / 1000) };
 }
 
-async function refreshTokens(slug, existing) {
-  // Intuit rotates the refresh token on every refresh, so a parallel caller or
-  // another process may already have rotated it. Prefer the newest state on
-  // disk: if a fresh access token is already there, use it; otherwise refresh
-  // with the newest refresh token we can find.
-  const onDisk = await loadTokens(slug);
+// Decide what a refresh should do, given what is on disk, what the caller
+// holds, and whether the caller is IMPORTING a credential.
+//
+// Normal path (force=false): prefer the newest state on disk. Intuit rotates
+// the refresh token on every refresh, so another caller may already have
+// rotated it; reusing a stale one knocks the company offline.
+//
+// Import path (force=true): the caller is supplying a refresh token that a
+// human just obtained (the OAuth Playground flow). It MUST be exchanged, and
+// it MUST be the token used, or the import silently validates nothing and
+// stores nothing: with force=false a re-authorization of an existing slug
+// would short-circuit to the on-disk tokens and report success for a paste
+// that was never checked.
+export function chooseRefreshSource(onDisk, existing, force = false, now = Date.now()) {
+  if (force) return { use: "existing", reason: "import: exchange the supplied token" };
   if (onDisk && onDisk.access_token !== existing.access_token &&
-      Date.now() < (onDisk.expires_at ?? 0) - 60_000) {
-    return onDisk;
+      now < (onDisk.expires_at ?? 0) - 60_000) {
+    return { use: "on-disk-fresh", reason: "a fresher access token is already on disk" };
   }
-  const current = onDisk?.refresh_token ? onDisk : existing;
+  return onDisk?.refresh_token
+    ? { use: "on-disk", reason: "on-disk refresh token is the newest known" }
+    : { use: "existing", reason: "nothing usable on disk" };
+}
+
+async function refreshTokens(slug, existing, { force = false } = {}) {
+  const onDisk = await loadTokens(slug);
+  const choice = chooseRefreshSource(onDisk, existing, force);
+  if (choice.use === "on-disk-fresh") return onDisk;
+  const current = choice.use === "on-disk" ? onDisk : existing;
 
   const creds = credentials();
   const body = new URLSearchParams({
@@ -469,9 +488,14 @@ async function refreshTokens(slug, existing) {
     // Intuit rotates the refresh token; keep the new one if returned.
     refresh_token: data.refresh_token || current.refresh_token,
     expires_at: now + data.expires_in * 1000,
-    refresh_expires_at: now + (data.x_refresh_token_expires_in
-      ? data.x_refresh_token_expires_in * 1000
-      : current.refresh_expires_at - now),
+    // Carry the prior expiry forward when Intuit omits the field. An imported
+    // credential has no prior value, so fall back to Intuit's documented
+    // 100-day floor rather than storing NaN.
+    refresh_expires_at: data.x_refresh_token_expires_in
+      ? now + data.x_refresh_token_expires_in * 1000
+      : (Number.isFinite(current.refresh_expires_at)
+          ? current.refresh_expires_at
+          : now + 100 * 86_400_000),
   };
   await saveTokens(slug, tokens);
   log(`Access token refreshed${sanitizeSlug(slug) ? ` for "${sanitizeSlug(slug)}"` : ""}.`);
