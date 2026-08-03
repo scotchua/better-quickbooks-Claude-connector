@@ -112,7 +112,8 @@ if (process.argv.includes("--connect-catcher")) {
   const environment = process.argv.includes("--sandbox") ? "sandbox" : "production";
   try {
     const { connectViaCatcher } = await import("./connect-catcher.js");
-    const r = await connectViaCatcher(slug, environment);
+    const r = await connectViaCatcher(slug, environment,
+      { openBrowserWindow: !process.argv.includes("--no-browser") });
     log(`Authorized "${r.slug}" → ${r.company_name ?? "(name unread)"} (realm ${r.realmId}, ${r.environment}).`);
     if (r.warning) log(r.warning);
     if (r.duplicate_slugs) log(`WARNING: realm ${r.realmId} is also authorized as: ${r.duplicate_slugs.join(", ")}`);

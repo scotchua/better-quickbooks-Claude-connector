@@ -29,6 +29,9 @@ one-paste redirect flow.
    Production).
 2. Set `QBO_CATCHER_REDIRECT_URI=<your url>` in `qbo-mcp-server/.env`.
 3. Run one test authorization: `npm run connect:catcher -- <slug>`.
+   Add `--no-browser` to print the authorize URL instead of launching one.
+   If Intuit says the redirect_uri is invalid, the URL is not registered on the
+   app yet; the flow prints the exact URL it is redirecting to so you can compare.
 
 `connect-catcher.js` uses exactly what that variable names and refuses to run
 without it, so there is no fallback page to retire later.

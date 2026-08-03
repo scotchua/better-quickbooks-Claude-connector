@@ -87,7 +87,7 @@ function parsePasted(pasted) {
  * @param {string} slug   Company slug; becomes tokens.<slug>.json.
  * @param {string} environment "production" (default) or "sandbox".
  */
-export async function connectViaCatcher(slug, environment = "production") {
+export async function connectViaCatcher(slug, environment = "production", { openBrowserWindow = true } = {}) {
   const clean = sanitizeSlug(slug);
   if (!clean) throw new Error("Give a company slug of letters, numbers, or hyphens.");
 
@@ -116,9 +116,14 @@ export async function connectViaCatcher(slug, environment = "production") {
     `&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}`;
 
   log(`Authorizing "${clean}" as ${environment}.`);
-  log("Opening Intuit. Log in, pick the company, and click Allow.");
+  log(openBrowserWindow
+    ? "Opening Intuit. Log in, pick the company, and click Allow."
+    : "Open this URL yourself (browser launch suppressed by --no-browser):");
   log("AUTHORIZE_URL>>> " + authUrl + " <<<");
-  openBrowser(authUrl);
+  log(`Redirecting to: ${redirectUri}`);
+  log("If Intuit answers \"the redirect_uri query parameter value is invalid\", that URL is");
+  log("not registered on this app. Add it under Keys & OAuth -> Redirect URIs, exactly.");
+  if (openBrowserWindow) openBrowser(authUrl);
 
   const pasted = await ask("\nPaste the line from the catcher page here: ");
   if (!pasted) throw new Error("Nothing pasted; no changes made.");

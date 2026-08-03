@@ -50,7 +50,7 @@ npm run connect:playground -- <slug>
 # page that shows the one-time code and you paste it back. There is NO default
 # page. Deploy docs/oauth-catcher/index.html somewhere you control, register
 # that HTTPS URL on your Intuit app, and set QBO_CATCHER_REDIRECT_URI.
-npm run connect:catcher -- <slug>
+npm run connect:catcher -- <slug>          # add --no-browser to print the URL only
 ```
 
 Both verify the landed company's name afterward and store tokens encrypted.
