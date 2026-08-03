@@ -1,35 +1,34 @@
 # Firm-hosted OAuth catcher
 
-`index.html` is a self-contained replacement for the Lovable-hosted catcher
-page (`https://qbo-oauth-catcher.lovable.app`). It reads the `code`, `state`,
+`index.html` is a self-contained catcher page for you to host. It reads the `code`, `state`,
 and `realmId` off its own URL and shows a copy button. No external requests,
 no analytics, nothing stored or transmitted; the pasted line is useless
 without the app's client secret, and the code is single-use.
 
-Why move it: the catcher sits in the production OAuth path for every client
-authorization. Hosting it on infrastructure the firm controls removes a
-third party from that path. This is trust-surface reduction, not an active
-vulnerability fix.
+Why host your own: the catcher sits in the production OAuth path for every
+client authorization. Running it on infrastructure you control keeps a third
+party out of that path. The connector ships no default page, so this flow does
+nothing until QBO_CATCHER_REDIRECT_URI names a page you own.
 
-Alternative that makes hosting unnecessary: `npm run connect:playground`
-imports tokens minted in Intuit's own OAuth 2.0 Playground, keeping every hop
-on Intuit-hosted pages. If the firm standardizes on that path, this page only
-needs to exist as a fallback and deploying it becomes optional.
+You may not need this at all: `npm run connect:playground -- <slug>` imports
+tokens minted in Intuit's own OAuth 2.0 Playground, so every hop stays on
+Intuit-operated pages and there is nothing to deploy. That is the recommended
+production path; this page is the alternative for anyone who prefers a
+one-paste redirect flow.
 
 ## Deploy (pick one, ~10 minutes)
 
-- GitHub Pages: push this folder to a repo the firm owns, enable Pages, note
-  the URL (e.g. `https://<org>.github.io/qbo-oauth-catcher/`).
-- A 1953.tax subdomain: upload `index.html` to any static host and point
-  `qbo-oauth.1953.tax` at it. HTTPS is required by Intuit.
+- GitHub Pages: push this folder to a repo you own, enable Pages, and note the
+  URL (e.g. `https://<your-org>.github.io/qbo-oauth-catcher/`).
+- Your own domain: upload `index.html` to any static host and point a
+  subdomain at it. HTTPS is required by Intuit; the page needs no backend.
 
 ## Switch over (after deploying)
 
-1. Add the new URL as a Redirect URI in the Intuit app (Development and
-   Production), alongside the old one.
-2. Set `QBO_CATCHER_REDIRECT_URI=<new url>` in `qbo-mcp-server/.env`.
-3. Run one test authorization (`npm run connect:catcher -- <slug>`).
-4. Remove the lovable.app redirect URI from the Intuit app.
+1. Add the URL as a Redirect URI in the Intuit app (Development and
+   Production).
+2. Set `QBO_CATCHER_REDIRECT_URI=<your url>` in `qbo-mcp-server/.env`.
+3. Run one test authorization: `npm run connect:catcher -- <slug>`.
 
-Until step 4, both catchers work; `connect-catcher.js` uses whichever
-`QBO_CATCHER_REDIRECT_URI` names, defaulting to the Lovable page.
+`connect-catcher.js` uses exactly what that variable names and refuses to run
+without it, so there is no fallback page to retire later.

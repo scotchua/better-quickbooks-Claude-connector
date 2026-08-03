@@ -39,17 +39,18 @@ locally and auto-refresh (~100 days).
 development environment) — two supported paths, pick either:
 
 ```bash
-# A. Hosted catcher page: Intuit redirects to a static page that shows the
-#    one-time code; paste it back. Page location is QBO_CATCHER_REDIRECT_URI
-#    (see docs/oauth-catcher/ to host it on firm infrastructure).
-npm run connect:catcher -- <slug>
-
-# B. Intuit's own OAuth 2.0 Playground: mint tokens on developer.intuit.com,
-#    paste the Realm ID and Refresh Token back (input hidden). No non-Intuit
-#    hosting anywhere in the path. One-time setup: add
-#    https://developer.intuit.com/v2/OAuth2Playground/RedirectUrl
-#    as a Redirect URI on the app's production keys page.
+# RECOMMENDED. Intuit's own OAuth 2.0 Playground: mint tokens on
+# developer.intuit.com, paste the Realm ID and Refresh Token back (input
+# hidden). Nothing to host, no third party in the path. One-time setup: add
+#   https://developer.intuit.com/v2/OAuth2Playground/RedirectUrl
+# as a Redirect URI on the app's production Keys & OAuth page.
 npm run connect:playground -- <slug>
+
+# ALTERNATIVE, if you would rather host a page: Intuit redirects to a static
+# page that shows the one-time code and you paste it back. There is NO default
+# page. Deploy docs/oauth-catcher/index.html somewhere you control, register
+# that HTTPS URL on your Intuit app, and set QBO_CATCHER_REDIRECT_URI.
+npm run connect:catcher -- <slug>
 ```
 
 Both verify the landed company's name afterward and store tokens encrypted.

@@ -216,8 +216,26 @@ A text window opens. Paste your Client ID after `QBO_CLIENT_ID=` and your Client
 Secret after `QBO_CLIENT_SECRET=`. Save and close the window.
 
 **Step 6 — Connect a company.**
-Pick a short nickname for the company (letters/numbers only, e.g. `acme`). Paste
-the line **for your system**, replacing `acme` with your nickname:
+
+> **Real client books?** Use this instead, then skip to Step 7:
+> ```bash
+> npm run connect:playground -- acme
+> ```
+> Intuit only accepts `localhost` as a redirect for its *test* companies, so the
+> command below works for sandbox files only. The playground flow gets you a real
+> company in about two minutes: it opens Intuit's own OAuth 2.0 Playground, you
+> pick your app and the company and click Allow, then paste back the **Realm ID**
+> and **Refresh Token** it shows you (your typing stays hidden). One-time setup:
+> on your app's **Production** Keys & OAuth page, add this Redirect URI exactly:
+> `https://developer.intuit.com/v2/OAuth2Playground/RedirectUrl`
+>
+> Nothing to host, and no third-party page in the middle. (There is a second
+> production option, `npm run connect:catcher`, for a one-paste redirect flow
+> against a page you host yourself; see `docs/oauth-catcher/`.)
+
+For an Intuit **sandbox** test company, pick a short nickname (letters/numbers
+only, e.g. `acme`) and paste the line **for your system**, replacing `acme` with
+your nickname:
 
 Mac:
 ```bash

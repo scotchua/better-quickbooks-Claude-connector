@@ -77,15 +77,19 @@ localhost redirect URIs outside the development environment). Use either
 working path; both verify the landed company and store tokens encrypted:
 
 ```bash
-# A. Hosted catcher page (paste back the one-time code it shows):
-cd "$PROJECT_DIR" && npm run connect:catcher -- <slug>
-
-# B. Intuit's OAuth 2.0 Playground (paste back Realm ID + Refresh Token,
-#    input hidden; every hop stays on Intuit-hosted pages). One-time setup:
-#    add https://developer.intuit.com/v2/OAuth2Playground/RedirectUrl as a
-#    Redirect URI on the app's PRODUCTION keys page, and in the playground
-#    pick the SAME app whose keys are in this project's .env.
+# RECOMMENDED: Intuit's OAuth 2.0 Playground. Paste back the Realm ID and
+# Refresh Token (input hidden); every hop stays on Intuit-operated pages and
+# there is nothing to host. One-time setup: add
+# https://developer.intuit.com/v2/OAuth2Playground/RedirectUrl as a Redirect
+# URI on the app's PRODUCTION keys page, and in the playground pick the SAME
+# app whose keys are in this project's .env, or the paste fails invalid_grant.
 cd "$PROJECT_DIR" && npm run connect:playground -- <slug>
+
+# ALTERNATIVE: a catcher page you host yourself. Requires
+# QBO_CATCHER_REDIRECT_URI in .env pointing at your own deployed copy of
+# docs/oauth-catcher/index.html, registered on the Intuit app. The flow
+# refuses to run without it; there is no default page.
+cd "$PROJECT_DIR" && npm run connect:catcher -- <slug>
 ```
 
 The connect flow tries to auto-open the browser, but don't rely on that alone.

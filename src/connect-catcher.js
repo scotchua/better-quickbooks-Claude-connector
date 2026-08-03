@@ -6,11 +6,17 @@
 // catch the callback on localhost:3000 — can only ever serve sandbox files.
 // Every real client has to come back through an HTTPS redirect.
 //
-// So production authorization uses a small hosted catcher page: Intuit
-// redirects there, the page shows the query string, and the operator pastes
-// that one line back here. No inbound port, no tunnel, and the pasted line is
-// useless to anyone else — the authorization code is single-use, expires in
-// minutes, and is worthless without this app's client secret.
+// So this flow uses a static catcher page that YOU host: Intuit redirects
+// there, the page shows the query string, and the operator pastes that one
+// line back here. No inbound port, no tunnel, and the pasted line is useless
+// to anyone else: the authorization code is single-use, expires in minutes,
+// and is worthless without this app's client secret.
+//
+// There is no default page, deliberately. Set QBO_CATCHER_REDIRECT_URI to a
+// page you control (docs/oauth-catcher/ has one ready to deploy, and its
+// README covers hosting). If you would rather host nothing at all, use
+// `npm run connect:playground -- <slug>` instead: it mints tokens in Intuit's
+// own OAuth 2.0 Playground, so every hop stays on Intuit-operated pages.
 //
 // The result is written straight to tokens.<slug>.json, so a production
 // company is authorized in one step with no import from anywhere else.
@@ -23,12 +29,28 @@ import { credentials, exchangeCodeForTokens, saveTokens, sanitizeSlug, qboReques
 
 const AUTHORIZE_URL = "https://appcenter.intuit.com/connect/oauth2";
 const SCOPE = "com.intuit.quickbooks.accounting";
-const DEFAULT_CATCHER = "https://qbo-oauth-catcher.lovable.app";
+
 
 const log = (...a) => console.error("[qbo-catcher]", ...a);
 
 function catcherRedirectUri() {
-  return process.env.QBO_CATCHER_REDIRECT_URI || DEFAULT_CATCHER;
+  const uri = (process.env.QBO_CATCHER_REDIRECT_URI || "").trim();
+  if (!uri) {
+    throw new Error(
+      "QBO_CATCHER_REDIRECT_URI is not set, and this flow ships no default page.\n" +
+      "  Either: host the page in docs/oauth-catcher/ (see its README), register that\n" +
+      "  HTTPS URL as a Redirect URI on your Intuit app, and set the variable in .env;\n" +
+      "  Or:     run `npm run connect:playground -- <slug>` instead, which needs nothing\n" +
+      "          hosted (tokens are minted in Intuit's own OAuth 2.0 Playground)."
+    );
+  }
+  if (!uri.startsWith("https://")) {
+    throw new Error(
+      `QBO_CATCHER_REDIRECT_URI must be an https:// URL (got "${uri}"). Intuit rejects ` +
+      "anything else as a production redirect."
+    );
+  }
+  return uri;
 }
 
 function openBrowser(url) {
