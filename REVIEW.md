@@ -350,7 +350,7 @@ The open questions from the initial review were resolved as follows. The affecte
 ### Still open (updated after the major-tier batch)
 
 - **`api_request` posture: resolved.** A read-only `api_get` tool was added so permission settings can always-allow reads while `api_request` (which can POST) stays behind approval; documented in README Step 9.
-- **The `sandbox-backup` special case** (`src/qbo.js:26`): kept as-is for now; a `backups/` directory remains the cleaner long-term convention.
+- **The `sandbox-backup` special case: resolved 2026-08-04.** Replaced by a `backups/` directory convention: discovery reads the project root only, so a token file parked in `backups/` is retained and never listed. The magic slug is gone; a legacy file of that name now triggers a one-line migration notice instead of being silently hidden.
 - **License: resolved 2026-08-02.** Apache-2.0 (LICENSE, NOTICE, CONTRIBUTING.md), matching Intuit's server. The original author (Isaac/Opzer) gave permission to modify and extend; attribution preserved in NOTICE.
 
 ---

@@ -29,3 +29,7 @@ __pycache__/
 # Client roster (local labels, includes client names)
 clients.json
 clients.json.bak
+
+# Token files kept but not in use. Company discovery reads the project root
+# only, so anything here is retained and never listed as a company.
+backups/

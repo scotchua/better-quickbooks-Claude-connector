@@ -61,8 +61,14 @@ async function qboFetch(url, init = {}, { idempotent = false } = {}) {
   }
 }
 
-// Token files that exist on disk but are not real, selectable companies.
-const NON_COMPANY_SLUGS = new Set(["sandbox-backup"]);
+// Retaining a token file without exposing it as a company is a matter of
+// WHERE it lives, not what it is called: company discovery reads this
+// directory only, so anything parked in backups/ is kept and ignored. That
+// replaces the former hardcoded "sandbox-backup" slug, which meant one magic
+// name was hidden and every other backup name silently became a selectable
+// company. Warned about once per process, below.
+const LEGACY_HIDDEN_SLUG = "sandbox-backup";
+let warnedLegacyBackup = false;
 
 function log(...args) {
   console.error("[qbo]", ...args);
@@ -162,10 +168,11 @@ async function saveTokens(slug, tokens) {
   log("Tokens saved to", p);
 }
 
-// Every authorized company is a tokens.<slug>.json file (excluding the legacy
-// default tokens.json and known non-company backups). Returns, sorted by slug,
+// Every authorized company is a tokens.<slug>.json file in THIS directory
+// (excluding the legacy default tokens.json). Returns, sorted by slug,
 // [{ slug, realmId, environment }] — the source of truth for what this connector
-// can reach right now.
+// can reach right now. The scan does not recurse, so a token file you want to
+// keep but not use belongs in backups/.
 async function listCompanies() {
   let files = [];
   try {
@@ -178,7 +185,11 @@ async function listCompanies() {
     const m = /^tokens\.(.+)\.json$/.exec(f); // note: skips the legacy tokens.json
     if (!m) continue;
     const slug = m[1];
-    if (NON_COMPANY_SLUGS.has(slug)) continue;
+    if (slug === LEGACY_HIDDEN_SLUG && !warnedLegacyBackup) {
+      warnedLegacyBackup = true;
+      log(`tokens.${LEGACY_HIDDEN_SLUG}.json is no longer hidden by name. Move it to ` +
+          `backups/ to keep it out of the company list, or rename it if it is a real company.`);
+    }
     try {
       const d = JSON.parse(await readFile(path.join(ROOT, f), "utf8"));
       out.push({ slug, realmId: d.realmId ?? null, environment: d.environment ?? null });

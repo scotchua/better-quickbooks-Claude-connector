@@ -111,6 +111,20 @@ never auto-pick — see the **Security** section of the README.
 > Typical flow in Claude: *"list my companies"* → *"work on 8315"* → *"create a
 > journal entry: debit Accounting 500, credit Checking 500"*.
 
+### Retiring a token file
+
+Company discovery reads the project root and does not recurse, so a token file
+you want to keep but not use goes in `backups/`: it stays on disk and stops
+appearing in `list_companies`. That is the whole mechanism. It replaced a
+hardcoded `sandbox-backup` slug, which hid exactly one filename while every
+other backup name quietly stayed selectable. An old `tokens.sandbox-backup.json`
+now draws a one-line notice until you move it.
+
+Offboarding a client for real is still `npm run disconnect -- <slug>`, which
+revokes the grant with Intuit before deleting anything. Parking a file in
+`backups/` hides it from this connector and nothing more: the grant stays live
+on Intuit's side.
+
 ### The `add-qbo-company` skill
 
 Bundled at [`.claude/skills/add-qbo-company/`](.claude/skills/add-qbo-company/).
