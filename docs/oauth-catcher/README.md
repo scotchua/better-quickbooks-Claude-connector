@@ -1,5 +1,29 @@
 # Firm-hosted OAuth catcher
 
+## In plain language
+
+When you give this tool permission to read a QuickBooks company, Intuit hands
+back a permission slip. For real client files, Intuit refuses to deliver that
+slip to your own computer, so it has to land on a page out on the web.
+
+Earlier versions came pre-set to a page the maintainer hosted. That worked, but
+it had two problems: every firm using the tool depended on someone else's
+website staying up, and that web address travelled inside the shared code.
+
+The tool now ships with no page set at all. You pick one of two routes:
+
+- **Use Intuit's own page.** Nothing to host, nothing to maintain, and every
+  step stays on Intuit's site. This is the recommended route and takes about two
+  minutes per company: `npm run connect:playground -- <slug>`.
+- **Host your own copy.** The page is in this folder. Put it on any web address
+  you control and point the tool at it, which is what the rest of this file
+  covers.
+
+Security is the same either way. What you paste back is single use, expires
+within minutes, and is worthless to anyone without your own secret key.
+
+## The page
+
 `index.html` is a self-contained catcher page for you to host. It reads the `code`, `state`,
 and `realmId` off its own URL and shows a copy button. No external requests,
 no analytics, nothing stored or transmitted; the pasted line is useless
