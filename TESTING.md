@@ -223,6 +223,12 @@ Do this on the firm's own books first, never a client's.
   be worked by hand, and an edit to a previously reconciled transaction is
   invisible here. Pass `statement_ending_balance` to get the tie-out; without
   it you get the unmatched lists only.
+- **A write that times out is ambiguous, but recoverable.** The error now
+  carries a `request_id`. Check QuickBooks first; if the transaction is not
+  there, re-send with `api_request` passing that same `request_id` and the
+  identical body. Intuit returns the original if it did land, so the replay
+  cannot double-post. Changing the body while reusing the id is refused,
+  because Intuit would return the original and drop the new write silently.
 - **Change data capture** covers roughly the last 30 days only.
 - **Duplicate detection** flags candidates, not conclusions. Legitimate repeats
   (rent, subscriptions) look identical to duplicates.

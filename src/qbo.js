@@ -14,7 +14,7 @@ import { readFile, writeFile, readdir, rename, unlink, open, stat } from "node:f
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { encryptionEnabled, encryptTokens, decryptTokens, isEncrypted } from "./secure-store.js";
-import { record as auditRecord, summarizeResponse, currentToolName } from "./audit.js";
+import { record as auditRecord, summarizeResponse, currentToolName, findWriteByRequestId } from "./audit.js";
 import { checkWritePolicy } from "./policy.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -32,8 +32,20 @@ const MINOR_VERSION = process.env.QBO_MINOR_VERSION || "75";
 // request was rejected before processing; 5xx and network errors are retried
 // only for idempotent requests, so a write is never blindly re-sent after the
 // server may have applied it.
+//
+// QBO_RETRY_WRITES=true extends those retries to writes. Measured against a
+// sandbox company on 2026-08-06: a POST replayed with the same `requestid`
+// returns the original record and creates nothing, verified against a control
+// proving duplicates are otherwise possible, and the window was still open at
+// 90 seconds (retries here give up inside 25). Every retry in this loop reuses
+// the same URL, so the requestid carries over automatically.
+//
+// It stays OFF by default anyway. The evidence covers one entity type, in
+// sandbox, at one point in time; a firm posting to real client books should
+// opt in deliberately rather than inherit it.
 const TIMEOUT_MS = Number(process.env.QBO_TIMEOUT_MS) || 60_000;
 const MAX_RETRIES = 3;
+const RETRY_WRITES = String(process.env.QBO_RETRY_WRITES || "").toLowerCase() === "true";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -654,7 +666,7 @@ async function getValidTokens(slug, { allowInteractive = false } = {}) {
 // /v3/company/{realmId}, e.g. "/reports/ProfitAndLoss?start_date=...". The
 // `company` option selects which company's tokens (and thus realmId + API host)
 // to use; omit it to use DEFAULT_COMPANY.
-async function qboRequest(pathAndQuery, { method = "GET", body, company } = {}) {
+async function qboRequest(pathAndQuery, { method = "GET", body, company, requestId: requestIdOverride } = {}) {
   // Central policy gate: every write, from any tool, passes through here.
   if (method !== "GET") {
     await checkWritePolicy(sanitizeSlug(company ?? DEFAULT_COMPANY), body ?? null);
@@ -666,29 +678,62 @@ async function qboRequest(pathAndQuery, { method = "GET", body, company } = {}) 
   // interrupted write is ambiguous: the caller cannot tell "never applied" from
   // "applied, response lost", and the natural response (retry) posts the
   // transaction twice. Replaying the SAME requestid returns the original
-  // outcome instead. It goes into the audit record so a deliberate retry can
-  // reuse it. Automatic retries for writes stay off in qboFetch until this is
-  // validated against a live company.
-  const requestId = method === "GET" ? undefined : randomUUID();
+  // outcome instead, confirmed by measurement (see qboFetch above). It goes
+  // into the audit record and into the error text so a deliberate retry can
+  // reuse it.
+  const requestId = method === "GET" ? undefined : (requestIdOverride || randomUUID());
   // Fingerprint of what was sent, so the audit log can answer "was this the
   // same posting twice, or two different ones?" without storing client data.
   const bodyHash = body
     ? createHash("sha256").update(JSON.stringify(body)).digest("hex").slice(0, 16)
     : undefined;
+
+  // Replaying an id is only safe with the identical body. The same measurement
+  // that proved replay idempotent also showed the failure mode: with a
+  // DIFFERENT body Intuit still returns the original record, HTTP 200, and
+  // discards the new write with nothing in the response to say so. The caller
+  // would read that as success. Refuse instead, using the body hash the audit
+  // log already stores.
+  if (requestIdOverride && method !== "GET") {
+    const prior = await findWriteByRequestId(requestIdOverride);
+    if (prior?.body_sha256 && bodyHash && prior.body_sha256 !== bodyHash) {
+      throw new Error(
+        `request_id ${requestIdOverride} was already used on ${prior.ts} for a DIFFERENT request ` +
+        `(${prior.method} ${prior.path}, body ${prior.body_sha256}; this one is ${bodyHash}). ` +
+        `Intuit would return that original transaction and silently discard this one. ` +
+        `Replay a request_id only with the byte-identical body it was first used for; omit it to post something new.`
+      );
+    }
+  }
   const url =
     `${apiBase}/v3/company/${tokens.realmId}${pathAndQuery}` +
     `${sep}minorversion=${MINOR_VERSION}` +
     (requestId ? `&requestid=${requestId}` : "");
 
-  const res = await qboFetch(url, {
-    method,
-    headers: {
-      Authorization: `Bearer ${tokens.access_token}`,
-      Accept: "application/json",
-      ...(body ? { "Content-Type": "application/json" } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  }, { idempotent: method === "GET" });
+  let res;
+  try {
+    res = await qboFetch(url, {
+      method,
+      headers: {
+        Authorization: `Bearer ${tokens.access_token}`,
+        Accept: "application/json",
+        ...(body ? { "Content-Type": "application/json" } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    }, { idempotent: method === "GET" || RETRY_WRITES });
+  } catch (e) {
+    // The ambiguous case, and the reason request_id exists: the write may or
+    // may not have landed. The id is useless to the operator unless it reaches
+    // them, and this error is the only place they will see it.
+    if (requestId) {
+      throw new Error(
+        `${e.message}. This write may or may not have been applied. Check QuickBooks first; ` +
+        `to re-send it safely, call again with request_id ${requestId} and the identical body, ` +
+        `which returns the original transaction if it did land.`
+      );
+    }
+    throw e;
+  }
 
   const text = await res.text();
   let data;
@@ -722,7 +767,12 @@ async function qboRequest(pathAndQuery, { method = "GET", body, company } = {}) 
 
   if (!res.ok) {
     throw new Error(
-      `QBO API ${res.status} on ${method} ${pathAndQuery}: ${detail}${tid ? ` (intuit_tid: ${tid})` : ""}`
+      `QBO API ${res.status} on ${method} ${pathAndQuery}: ${detail}${tid ? ` (intuit_tid: ${tid})` : ""}` +
+      // A 5xx is the other ambiguous outcome: Intuit may have applied the write
+      // before failing to answer. 4xx is a clean rejection and needs no replay.
+      (requestId && res.status >= 500
+        ? ` (request_id: ${requestId}. Re-send with this same request_id and body to replay safely.)`
+        : "")
     );
   }
   return data;

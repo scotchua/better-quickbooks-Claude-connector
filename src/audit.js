@@ -12,7 +12,7 @@
 //           that does and does not guarantee)
 //   off     no audit log at all
 
-import { appendFile, mkdir } from "node:fs/promises";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -79,6 +79,38 @@ export function summarizeResponse(data) {
     }
   }
   return {};
+}
+
+// The most recent audit record for a given Intuit requestid, or null.
+//
+// This is what makes replaying a requestid safe. Measured against a sandbox
+// company on 2026-08-06: replaying an id with the SAME body returns the
+// original record and creates nothing (good, that is the recovery path), but
+// replaying it with a DIFFERENT body also returns the original, with an HTTP
+// 200 and a plausible entity, while the new write is silently discarded.
+// Comparing body_sha256 against the prior record is the only way to tell those
+// apart before sending, and the audit log has recorded that hash all along.
+//
+// Scans this month and last, newest line first, so a replay near a month
+// boundary still finds its original.
+export async function findWriteByRequestId(requestId, now = new Date()) {
+  if (!requestId || !auditEnabled()) return null;
+  const previous = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  for (const month of [now, previous]) {
+    let text;
+    try { text = await readFile(auditFilePath(month), "utf8"); } catch { continue; }
+    const lines = text.split("\n");
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim();
+      // Cheap substring reject before paying for JSON.parse on every line.
+      if (!line || !line.includes(requestId)) continue;
+      try {
+        const rec = JSON.parse(line);
+        if (rec.request_id === requestId) return rec;
+      } catch { /* skip a corrupt line rather than failing the write */ }
+    }
+  }
+  return null;
 }
 
 // Append one audit record.

@@ -3645,10 +3645,17 @@ registerTool(
     path: z.string().describe("Path after /v3/company/{realmId}, starting with '/'"),
     method: z.enum(["GET", "POST"]).optional().describe("Default GET"),
     body: z.record(z.any()).optional().describe("JSON body for POST"),
+    request_id: z.string().optional().describe(
+      "RECOVERY ONLY. Replay a write whose outcome is unknown (it timed out, or returned 5xx) by passing the request_id " +
+      "from that error or the audit log, together with the BYTE-IDENTICAL body. Intuit returns the original transaction " +
+      "if it landed and posts it once if it did not, so the write cannot be duplicated. Reusing an id with a changed body " +
+      "is refused, because Intuit would return the original and silently discard the new write. Never pass this for a new posting."
+    ),
     company: companyArg,
   },
-  tool(async ({ path: reqPath, method, body, company }) => {
+  tool(async ({ path: reqPath, method, body, request_id, company }) => {
     const isWrite = (method || "GET").toUpperCase() !== "GET";
+    if (request_id && !isWrite) throw new Error("request_id only applies to writes; a GET is already safe to repeat.");
     const c = await resolveCompany(company, { write: isWrite });
     const p = reqPath.startsWith("/") ? reqPath : `/${reqPath}`;
     if (/[\r\n\t]/.test(p)) throw new Error("Control characters are not allowed in `path`.");
@@ -3662,7 +3669,7 @@ registerTool(
       throw new Error("Path traversal sequences are not allowed in `path`; it must stay under /v3/company/{realmId}.");
     }
     if (isWrite) await assertRawDestructiveAllowed(p, c);
-    return asText(await qboRequest(p, { method: method || "GET", body, company: c }));
+    return asText(await qboRequest(p, { method: method || "GET", body, company: c, requestId: request_id }));
   })
 );
 

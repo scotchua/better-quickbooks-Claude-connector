@@ -306,6 +306,19 @@ with the caller's parent pid). The refresh token never leaves this process.
 - **Fleet tools** merge per-company report trees by account name;
   `create_journal_entry_multi` requires an explicit company list and returns
   per-company results.
+- **Interrupted writes are recoverable, and replay is guarded.** Every write
+  carries an Intuit `requestid`. Measured against a sandbox company on
+  2026-08-06, with a control proving duplicates are otherwise possible:
+  replaying an id with the **same** body returns the original record and
+  creates nothing, and the window was still open at 90 seconds. Replaying it
+  with a **different** body also returns the original, HTTP 200, silently
+  discarding the new write. That second behaviour is why `qboRequest` compares
+  the new body hash against the `body_sha256` the audit log recorded for that
+  id and refuses a mismatch before sending. Timeouts and 5xx responses now
+  report the `request_id` in the error, and `api_request` accepts `request_id`
+  to replay deliberately. `QBO_RETRY_WRITES=true` extends automatic retries to
+  writes; off by default, because the measurement covered one entity type in
+  sandbox.
 - **Report size is capped inline.** `reportResult` refuses anything over
   `QBO_REPORT_MAX_INLINE_CHARS` (default 300,000) unless `save_path` is given,
   and the error names the actual size. Detail reports are why:
