@@ -79,6 +79,25 @@ describe("MCP server contract", () => {
     expect(byName("get_transaction_links").annotations.readOnlyHint).toBe(true);
   });
 
+  // The detail variants ride on the existing tools rather than adding four
+  // more; if the flag stops being registered they silently become unreachable.
+  it("offers detail and save_path on the balance and valuation reports", () => {
+    for (const n of ["get_customer_balance", "get_vendor_balance", "get_inventory_valuation"]) {
+      const props = byName(n).inputSchema.properties;
+      expect(Object.keys(props), n).toEqual(expect.arrayContaining(["detail", "save_path"]));
+    }
+  });
+
+  // A detail report can exceed 900KB with no way to bound it by date, so the
+  // escape hatch has to name the reports that have no tool of their own.
+  it("points at the working reports that were deliberately not wrapped", () => {
+    for (const n of ["api_get", "api_request"]) {
+      for (const r of ["ClassSales", "DepartmentSales", "CustomerIncome"]) {
+        expect(byName(n).description, `${n} should mention ${r}`).toContain(r);
+      }
+    }
+  });
+
   it("gives every tool a description and an input schema", () => {
     const missing = tools.filter((t) => !t.description || !t.inputSchema);
     expect(missing.map((t) => t.name)).toEqual([]);

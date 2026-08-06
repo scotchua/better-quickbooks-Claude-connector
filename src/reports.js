@@ -157,6 +157,27 @@ export function flagGlRows(rows) {
 }
 
 
+// Pretty-print a report for an inline reply, refusing when it is too big.
+//
+// A detail report can be enormous with no way to bound it from the request:
+// CustomerBalanceDetail on a real firm file came back at 4,420 rows and
+// roughly 900KB, and neither report_date nor a date range reduces it (that
+// report ignores start_date/end_date outright). Only an entity filter does.
+//
+// Returned inline, that floods the conversation and buys nothing. Refusing is
+// cheap because reports are always regenerable, and it beats truncating, which
+// would hand back a report that looks complete and is not.
+export function serializeReportInline(report, maxChars) {
+  const text = JSON.stringify(report, null, 2);
+  if (text.length <= maxChars) return text;
+  const name = report?.Header?.ReportName || "This report";
+  throw new Error(
+    `${name} came back at ${text.length.toLocaleString()} characters, above the ${Number(maxChars).toLocaleString()} inline limit. ` +
+    `Pass save_path to write it to a file and get a receipt, or narrow it: on a balance detail report a customer or vendor filter ` +
+    `cuts the size far more than any date does. Raise QBO_REPORT_MAX_INLINE_CHARS to allow it inline.`
+  );
+}
+
 // One-line receipt for a report written to disk instead of returned inline.
 // Pure so it is testable; the caller owns the filesystem. The header line matters:
 // it is how the reader confirms the file on disk is the window, basis and

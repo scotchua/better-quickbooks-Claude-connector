@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { flattenReport, toNumber, consolidateReports, glFlatten, flagGlRows, reportReceipt } from "../src/reports.js";
+import { flattenReport, toNumber, consolidateReports, glFlatten, flagGlRows, reportReceipt, serializeReportInline } from "../src/reports.js";
 
 const pnl = (income, rentName, rentAmt) => ({
   Columns: { Column: [{ ColTitle: "", ColType: "Account" }, { ColTitle: "Total", ColType: "Money" }] },
@@ -116,6 +116,43 @@ describe("glFlatten + flags", () => {
     const row = glFlatten(flattenReport(gl))[0];
     expect(row).not.toHaveProperty("id");
     expect(row).not.toHaveProperty("balance");
+  });
+});
+
+describe("serializeReportInline", () => {
+  const big = (rows) => ({
+    Header: { ReportName: "CustomerBalanceDetail" },
+    Rows: { Row: Array.from({ length: rows }, (_, i) => ({ ColData: [{ value: `row ${i}` }, { value: "100.00" }] })) },
+  });
+
+  it("returns the pretty-printed report when it fits", () => {
+    const out = serializeReportInline(big(2), 100_000);
+    expect(out).toContain("CustomerBalanceDetail");
+    expect(JSON.parse(out).Rows.Row).toHaveLength(2);
+  });
+
+  it("refuses an oversized report rather than truncating it", () => {
+    // Truncating would hand back something that looks complete and is not.
+    expect(() => serializeReportInline(big(5000), 1000)).toThrow(/above the 1,000 inline limit/);
+  });
+
+  it("names the report, the actual size, and both ways out", () => {
+    let msg = "";
+    try { serializeReportInline(big(5000), 1000); } catch (e) { msg = e.message; }
+    expect(msg).toMatch(/^CustomerBalanceDetail came back at [\d,]+ characters/);
+    expect(msg).toContain("save_path");
+    expect(msg).toContain("customer or vendor filter");   // the filter that actually works
+    expect(msg).toContain("QBO_REPORT_MAX_INLINE_CHARS");
+  });
+
+  it("degrades to a generic name when the report has no header", () => {
+    expect(() => serializeReportInline({ Rows: { Row: [] } }, 1)).toThrow(/^This report came back/);
+  });
+
+  it("treats the limit as inclusive", () => {
+    const exact = JSON.stringify({ a: 1 }, null, 2).length;
+    expect(() => serializeReportInline({ a: 1 }, exact)).not.toThrow();
+    expect(() => serializeReportInline({ a: 1 }, exact - 1)).toThrow();
   });
 });
 

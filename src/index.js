@@ -91,7 +91,7 @@ import {
   recordIntent,
   recordPosted,
 } from "./csv.js";
-import { flattenReport, consolidateReports, glFlatten, flagGlRows, reportReceipt } from "./reports.js";
+import { flattenReport, consolidateReports, glFlatten, flagGlRows, reportReceipt, serializeReportInline } from "./reports.js";
 import { matchTransactions, findDuplicateGroups, bankRegisterFromGl, bankTieOut } from "./reconcile.js";
 import { planInvoiceAllocations, planBillPaymentApplication } from "./allocate.js";
 import { extractLinks, summarizeTxn, describeChain, READABLE_TXN_TYPES } from "./links.js";
@@ -314,8 +314,16 @@ function tool(handler) {
 // caller names save_path the JSON is written there and only a short receipt comes
 // back, so a downstream script reads the file and the payload never has to travel
 // through the conversation. Omit save_path and behaviour is exactly as before.
+// Cap on what a report tool will return inline; see serializeReportInline.
+const REPORT_MAX_INLINE_CHARS = Number(process.env.QBO_REPORT_MAX_INLINE_CHARS) || 300_000;
+
 async function reportResult(obj, save_path) {
-  if (!save_path) return asText(obj);
+  // Throws when the report is too large to be worth returning inline, naming
+  // the size and the two ways out. save_path skips the check entirely: writing
+  // a large report to disk is exactly the supported path.
+  // serializeReportInline returns exactly what asText would have produced, so
+  // handing the string straight through avoids stringifying the report twice.
+  if (!save_path) return asText(serializeReportInline(obj, REPORT_MAX_INLINE_CHARS));
   // overwrite is allowed here on purpose: a report is regenerable, and writing
   // the same dated file again is the normal shape of a close re-run. The
   // QBO_FILES_DIR fence still applies. Binary downloads (PDFs, attachments)
@@ -1112,16 +1120,25 @@ registerTool(
 
 registerTool(
   "get_inventory_valuation",
-  "Inventory Valuation Summary: quantity, asset value, and average cost per inventory item as of a date.",
+  "Inventory Valuation Summary: quantity, asset value, and average cost per inventory item as of a date. Set detail: true for the transaction-level version, which shows every movement behind each item's quantity and cost and takes a date range rather than an as-of date.",
   {
-    report_date: isoDate.optional().describe("As-of date (YYYY-MM-DD); omit for today"),
+    report_date: isoDate.optional().describe("As-of date (YYYY-MM-DD) for the summary; omit for today"),
+    detail: z.boolean().optional().describe("Transaction-level detail instead of one row per item"),
+    start_date: isoDate.optional().describe("YYYY-MM-DD (detail only)"),
+    end_date: isoDate.optional().describe("YYYY-MM-DD (detail only)"),
     date_macro: dateMacroArg,
     save_path: savePathArg,
     company: companyArg,
   },
-  tool(async ({ report_date, date_macro, save_path, company }) => {
+  tool(async ({ report_date, detail, start_date, end_date, date_macro, save_path, company }) => {
     const c = await resolveCompany(company);
-    return reportResult(await qboRequest(`/reports/InventoryValuationSummary${reportQuery({ report_date, date_macro })}`, { company: c }), save_path);
+    // The summary is an as-of report and the detail is a period report, so the
+    // date arguments are not interchangeable between them.
+    const q = detail
+      ? reportQuery({ start_date, end_date, date_macro })
+      : reportQuery({ report_date, date_macro });
+    const report = detail ? "InventoryValuationDetail" : "InventoryValuationSummary";
+    return reportResult(await qboRequest(`/reports/${report}${q}`, { company: c }), save_path);
   })
 );
 
@@ -3206,11 +3223,22 @@ registerTool(
 
 registerTool(
   "get_customer_balance",
-  "Customer Balance report: what every customer currently owes.",
-  { customer: z.string().optional().describe("Limit to a single customer Id"), date_macro: dateMacroArg, company: companyArg },
-  tool(async ({ customer, date_macro, company }) => {
+  "Customer Balance report: what every customer currently owes. Set detail: true for the transaction-level version (every open invoice and payment behind each balance). Detail runs large: filter to one customer, or pass save_path, because dates do not shrink it.",
+  {
+    customer: z.string().optional().describe("Limit to a single customer Id. On the detail report this is the only filter that meaningfully bounds the size."),
+    detail: z.boolean().optional().describe("Transaction-level detail instead of one row per customer"),
+    report_date: isoDate.optional().describe("As-of date (YYYY-MM-DD); omit for today"),
+    date_macro: dateMacroArg,
+    save_path: savePathArg,
+    company: companyArg,
+  },
+  tool(async ({ customer, detail, report_date, date_macro, save_path, company }) => {
     const c = await resolveCompany(company);
-    return asText(await qboRequest(`/reports/CustomerBalance${reportQuery({ customer, date_macro })}`, { company: c }));
+    const report = detail ? "CustomerBalanceDetail" : "CustomerBalance";
+    return reportResult(
+      await qboRequest(`/reports/${report}${reportQuery({ customer, report_date, date_macro })}`, { company: c }),
+      save_path
+    );
   })
 );
 
@@ -3233,11 +3261,22 @@ registerTool(
 
 registerTool(
   "get_vendor_balance",
-  "Vendor Balance report: what you currently owe every vendor.",
-  { vendor: z.string().optional().describe("Limit to a single vendor Id"), date_macro: dateMacroArg, company: companyArg },
-  tool(async ({ vendor, date_macro, company }) => {
+  "Vendor Balance report: what you currently owe every vendor. Set detail: true for the transaction-level version (every open bill and payment behind each balance).",
+  {
+    vendor: z.string().optional().describe("Limit to a single vendor Id"),
+    detail: z.boolean().optional().describe("Transaction-level detail instead of one row per vendor"),
+    report_date: isoDate.optional().describe("As-of date (YYYY-MM-DD); omit for today"),
+    date_macro: dateMacroArg,
+    save_path: savePathArg,
+    company: companyArg,
+  },
+  tool(async ({ vendor, detail, report_date, date_macro, save_path, company }) => {
     const c = await resolveCompany(company);
-    return asText(await qboRequest(`/reports/VendorBalance${reportQuery({ vendor, date_macro })}`, { company: c }));
+    const report = detail ? "VendorBalanceDetail" : "VendorBalance";
+    return reportResult(
+      await qboRequest(`/reports/${report}${reportQuery({ vendor, report_date, date_macro })}`, { company: c }),
+      save_path
+    );
   })
 );
 
@@ -3601,7 +3640,7 @@ registerTool(
 
 registerTool(
   "api_request",
-  "Advanced escape hatch: make a raw authenticated call to any QBO endpoint under /v3/company/{realmId}. Provide `path` (e.g. \"/reports/GeneralLedger?start_date=2026-01-01\", \"/query?query=SELECT * FROM Bill\", \"/invoice/145\"), an HTTP method, and an optional JSON body. Auth, realm, and minorversion are handled for you. Known-broken endpoints, do not call: /reports/BudgetVsActuals (Actual column is inception-to-date regardless of dates; join the Budget entity to monthly P&L instead) and the sales-tax report family (/reports/TaxSummary etc.; compute from the liability account's GL).",
+  "Advanced escape hatch: make a raw authenticated call to any QBO endpoint under /v3/company/{realmId}. Provide `path` (e.g. \"/reports/GeneralLedger?start_date=2026-01-01\", \"/query?query=SELECT * FROM Bill\", \"/invoice/145\"), an HTTP method, and an optional JSON body. Auth, realm, and minorversion are handled for you. Working reports with no tool of their own: /reports/ClassSales, /reports/DepartmentSales, /reports/CustomerIncome. Known-broken endpoints, do not call: /reports/BudgetVsActuals (Actual column is inception-to-date regardless of dates; join the Budget entity to monthly P&L instead) and the sales-tax report family (/reports/TaxSummary etc.; compute from the liability account's GL).",
   {
     path: z.string().describe("Path after /v3/company/{realmId}, starting with '/'"),
     method: z.enum(["GET", "POST"]).optional().describe("Default GET"),
@@ -3632,7 +3671,7 @@ registerTool(
 // api_request (which can write) should stay behind approval.
 registerTool(
   "api_get",
-  "Read-only escape hatch: GET any QBO endpoint under /v3/company/{realmId} (reports, queries, single records). Never writes; safe to always-allow. Use api_request when a POST is required. Known-broken endpoints, do not call: /reports/BudgetVsActuals (inception-to-date actuals regardless of dates) and the sales-tax report family (/reports/TaxSummary etc.; use the liability account's GL).",
+  "Read-only escape hatch: GET any QBO endpoint under /v3/company/{realmId} (reports, queries, single records). Never writes; safe to always-allow. Use api_request when a POST is required. Working reports with no tool of their own, reach them here: /reports/ClassSales, /reports/DepartmentSales, /reports/CustomerIncome (income, expense and net per customer). Known-broken endpoints, do not call: /reports/BudgetVsActuals (inception-to-date actuals regardless of dates) and the sales-tax report family (/reports/TaxSummary etc.; use the liability account's GL).",
   {
     path: z.string().describe("Path after /v3/company/{realmId}, starting with '/'"),
     company: companyArg,

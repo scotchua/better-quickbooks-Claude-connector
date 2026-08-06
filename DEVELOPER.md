@@ -306,6 +306,20 @@ with the caller's parent pid). The refresh token never leaves this process.
 - **Fleet tools** merge per-company report trees by account name;
   `create_journal_entry_multi` requires an explicit company list and returns
   per-company results.
+- **Report size is capped inline.** `reportResult` refuses anything over
+  `QBO_REPORT_MAX_INLINE_CHARS` (default 300,000) unless `save_path` is given,
+  and the error names the actual size. Detail reports are why:
+  `CustomerBalanceDetail` on a real firm file is over 3M characters, and
+  neither `report_date` nor a date range shrinks it (it ignores
+  `start_date`/`end_date` outright). Only a customer or vendor filter does.
+  Refusing beats truncating, which would return a report that looks complete.
+- **Detail report variants ride on the summary tools** via `detail: true`
+  rather than four new tools: `get_customer_balance`, `get_vendor_balance`,
+  `get_inventory_valuation`. Note the date arguments are not interchangeable
+  between the two forms. The balance reports are as-of (`report_date`) and
+  inventory valuation detail is a period report (`start_date`/`end_date`).
+  `ClassSales`, `DepartmentSales` and `CustomerIncome` work but are
+  deliberately unwrapped; the `api_get` description names them.
 - **Reconciliation** builds the register from one account-filtered
   `GeneralLedger` call rather than per-entity queries, so every type that hits
   the account is covered and the signs come from the ledger instead of an
