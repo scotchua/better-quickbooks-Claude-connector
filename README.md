@@ -12,24 +12,30 @@ This is for **accountants and bookkeepers** who use QuickBooks Online for more
 than one company and want Claude to help with real work — pulling reports,
 cleaning up the books, sending invoices, and entering transactions.
 
-The QuickBooks connector that comes built into Claude has two big limits:
+The QuickBooks connector that comes built into Claude is aimed at a different
+job. It launched read-only, and Intuit has since been adding specific actions to
+it (invoicing, payroll lookups), but it is built for a small business looking at
+**its own** books:
 
-- It is **read-only.** It can look, but it cannot make an invoice, a bill, or a
-  journal entry.
+- It covers a **narrow slice** of QuickBooks. Fine for "how did we do last
+  month" and a few common actions; not the full ledger a bookkeeper works in.
 - It points at **one company at a time.** If you handle 5, 20, or 50 client
   files, switching back and forth gets slow and clumsy.
 
-This tool fixes both:
+This tool is built for the other end of that:
 
 - **Many companies, one connector.** Connect all your client files once. Then
   just tell Claude which one to use — *"work on Acme."* No switching connectors,
-  no restarts.
-- **Read *and* write.** Create invoices, bills, journal entries, and more — the
-  things you actually do in QuickBooks.
+  no restarts. Anything that *changes* the books names its company on the
+  request itself, so a write can never inherit the wrong one.
+- **The whole ledger, read *and* write.** Invoices, bills, journal entries,
+  bill payments, deposits, transfers, credit memos, the chart of accounts, class
+  and location tagging — the things you actually do in QuickBooks all day, not a
+  handful of common ones.
 - **114 tools** covering reports, transactions, searches with typed filters,
   bill payments, invoice and estimate PDFs, attachments, change tracking,
-  reconciliation, multi-company consolidation, diagnostics, and a safe bulk
-  CSV import. Connecting a new client happens in the chat: Claude hands you an
+  reconciliation, side-by-side multi-company reporting, diagnostics, and a safe
+  bulk CSV import. Connecting a new client happens in the chat: Claude hands you an
   Intuit link, you click Allow, and it confirms which company landed.
 
 You do **not** need to know how to code. The setup below is copy-and-paste.
@@ -55,9 +61,13 @@ You do **not** need to know how to code. The setup below is copy-and-paste.
   and safe to re-run), attach source documents, run collections, and pull
   "what changed since" reports for any entity.
 - **Work across clients:** switch between companies in one connector, or name one
-  per request. Run a consolidated P&L or Balance Sheet across every client at
-  once, or post the same journal entry (like a monthly management fee) to many
-  files in one call.
+  per request. Put several named clients' P&L or Balance Sheet side by side in one
+  table with a combined column, or post the same journal entry (like a monthly
+  management fee) to many files in one call. The multi-company reports are an
+  arithmetic combination, not an accounting consolidation: no eliminations, no
+  ownership test, and rows only merge where account names match. You name the
+  companies; there is no "everything at once" default, and mixing home currencies
+  is refused rather than silently summed.
 - **Review the books:** reconcile a bank statement against the register, scan
   for duplicate transactions, and pull a flat general ledger with review flags
   (weekend postings, large or round amounts, journal entries).
@@ -67,7 +77,9 @@ You do **not** need to know how to code. The setup below is copy-and-paste.
 ## Security — what we did to keep your books safe
 
 This app can change **real** accounting data, so safety was built in from the
-start. Here is **every** safety feature, in plain words.
+start. Here are the protections that matter, in plain words. (For the technical
+detail behind each, see [SECURITY.md](SECURITY.md) and
+[DEVELOPER.md](DEVELOPER.md).)
 
 ### It all runs on your own computer
 
@@ -87,18 +99,29 @@ QuickBooks (Intuit). That means:
 
 ### Keeping companies from getting mixed up
 
-- **You pick the company. The app never guesses on a write.** You can name the
-  company on any request, or set an active one first with **`select_company`**
-  (and check it with **`get_active_company`** or **`list_companies`**). For
-  anything that **changes** your books — an invoice, a bill, a journal entry —
-  the app will **stop and ask** if you did not say which company. It will only
-  auto-pick for harmless "read" actions, and only when just one company is
-  connected. So a payment can never quietly land in the wrong client's file.
+- **Writes name their own company. Always.** For reading, you can set an active
+  company with **`select_company`** and then just talk (check it with
+  **`get_active_company`** or **`list_companies`**). For anything that
+  **changes** your books — an invoice, a bill, a journal entry — that is not
+  enough: the company has to be named on the request itself, or the app stops
+  and asks.
+
+  The reason is that one copy of this app serves **every Claude conversation you
+  have open at once**, so the "active company" is shared between them. If a write
+  could inherit it, picking a client in one chat could redirect a write you made
+  in another. Requiring the name on the write removes that path entirely. (If you
+  only ever have one chat open and prefer the old behaviour, set
+  `QBO_REQUIRE_EXPLICIT_COMPANY=false` in `.env`.)
 - **Only real company names are accepted.** If you name a company that is not
   connected, the app refuses and shows you the list of ones that are.
-- **The company name is cleaned first.** Names are stripped down to plain
-  letters, numbers, dashes, and underscores. This stops a tricky name from
-  reaching any file outside the app's own folder.
+- **A misspelled company name is an error, not a guess.** Names may contain only
+  letters, numbers, dashes, and underscores. Anything else is rejected outright
+  rather than quietly cleaned up, because "acme!" silently becoming "acme" is how
+  a typo ends up posting to a real client's books.
+- **Test books and real books can use different keys.** Intuit issues separate
+  development and production keys, and each only works against its own side. If
+  you run sandbox files alongside real ones, set both pairs in `.env` and the app
+  picks the right one per company.
 - **Test books and real books stay apart.** Each company remembers whether it is
   a **test (sandbox)** or **real (production)** file, and every request is sent
   to the matching QuickBooks address. A test action cannot hit real books.
@@ -143,9 +166,30 @@ QuickBooks (Intuit). That means:
 
 ### Keeping changes from going wrong
 
-- **Preview before you post.** The bank-CSV import has a **`dry_run`** mode: it
-  shows you what it *would* do — every row and its category — before anything is
-  saved. You approve, then it posts.
+- **Preview before you post, and it is not optional.** The bank-CSV import
+  **requires** a `dry_run` of that exact file against that exact account first.
+  The preview shows every row and the category it guessed; only after you have
+  seen it will the live import run. Categorization is a keyword match, so the
+  dry run is the step where a human catches a mis-filed expense.
+- **Re-running an import cannot double-post.** Every imported row is stamped
+  with a marker in its QuickBooks memo, and the app keeps a local journal of what
+  it sent. If it is interrupted part-way, the next run asks QuickBooks which rows
+  actually landed instead of assuming, and skips those.
+- **A write that times out is not repeated blindly.** Each change carries a
+  one-time id that Intuit recognizes, so a lost reply can be re-sent safely
+  instead of creating a second invoice.
+- **The guardrail file fails closed.** If `qbo-policy.json` is unreadable or has
+  a typo in it, the app refuses to write at all rather than treating "cannot read
+  the rules" as "there are no rules."
+- **Local files stay where you put them.** Set `QBO_FILES_DIR` in `.env` (the
+  firm's client-files root, e.g. `~/Claude`) and every file the app reads or
+  writes must live inside that folder. Shortcuts and symlinks are resolved before
+  the check, so a link inside the folder cannot reach outside it, and files whose
+  names look like credentials are refused everywhere. Attaching a document to a
+  QuickBooks record **requires** this to be set, because that file leaves your
+  computer.
+- **Saving a file will not silently replace one.** Downloaded PDFs and
+  attachments refuse to overwrite an existing file unless you say so.
 - **Errors are handled cleanly.** If a request fails, the app returns a clear
   message instead of crashing, so nothing is left half-done.
 
@@ -170,7 +214,9 @@ need to understand them — just follow along in order.
 **Step 1 — Install Node (the engine this app runs on).**
 Go to [nodejs.org](https://nodejs.org), click the big button that says **LTS**,
 and run the file it downloads (a `.pkg` on Mac, a `.msi` on Windows). Click
-"Continue" / "Next" until it finishes.
+"Continue" / "Next" until it finishes. The LTS button gives you a new enough
+version; this app needs **Node 22 or newer**. If you already have Node and are
+not sure, run `node --version`.
 
 **Step 2 — Download this project.**
 On this page, click the green **Code** button, then **Download ZIP**. Unzip it
@@ -217,7 +263,12 @@ Windows (PowerShell):
 copy .env.example .env; notepad .env
 ```
 A text window opens. Paste your Client ID after `QBO_CLIENT_ID=` and your Client
-Secret after `QBO_CLIENT_SECRET=`. Save and close the window.
+Secret after `QBO_CLIENT_SECRET=`.
+
+While you are in there, find the line `# QBO_FILES_DIR=~/Claude`, remove the
+leading `# `, and set it to the folder where your client files live. This fences
+every file the app reads or writes into that one folder, and attaching documents
+to QuickBooks records will not work without it. Save and close the window.
 
 **Step 6 — Connect a company.**
 
@@ -303,7 +354,9 @@ versus asking you first.
 ![QuickBooks connector tool permissions in Claude Desktop](docs/images/tool-permissions.png)
 
 Each tool can be set to **Always allow** (✓), **Needs approval** (✋), or **Never**
-(⛔). Our recommendation:
+(⛔). Every tool tells Claude Desktop whether it only reads, whether it destroys
+anything, and whether running it twice is safe, so the list should already sort
+sensibly. Our recommendation:
 
 - **Read-only tools → Always allow.** They only *look* at the books, so letting
   them run freely keeps Claude fast. Examples: *List companies, Get profit and

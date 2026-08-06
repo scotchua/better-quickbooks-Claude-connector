@@ -10,6 +10,8 @@ takes a couple of minutes each, with no restart.
 > **What you'll end up with:** one **`qbo`** connector in Claude Desktop that can
 > reach **all** of your companies. You pick the company as you work: *"work on
 > acme"*, or name it in any request. No switching connectors, no restarts.
+> Anything that *changes* the books names its company explicitly, so a write can
+> never land in the wrong client's file.
 
 ---
 
@@ -61,8 +63,12 @@ The app needs two secret keys from Intuit so it can talk to QuickBooks.
    *(If this is missing, the login in Step 6 will fail.)*
 
 > **Sandbox vs. production:** Intuit gives you separate keys for **sandbox** (test
-> companies) and **production** (real client books). Use the set that matches what
-> you're connecting. If in doubt and it's a real business, it's production.
+> companies) and **production** (real client books), and each set only works
+> against its own side. If in doubt and it's a real business, it's production.
+> If you want test files and real books connected at the same time, you can put
+> **both** sets in the settings file (production in `QBO_CLIENT_ID` /
+> `QBO_CLIENT_SECRET`, test in `QBO_CLIENT_ID_SANDBOX` /
+> `QBO_CLIENT_SECRET_SANDBOX`) and the app picks the right one per company.
 
 ## Step 5: Create the `.env` file (paste your keys)
 
@@ -70,6 +76,12 @@ Claude creates a settings file called **`.env`** and opens it for you. Paste you
 **Client ID** and **Client Secret** into the matching lines, then **save**.
 
 Claude confirms the keys are in place **without printing your secret** on screen.
+
+> **Also set `QBO_FILES_DIR`.** In the same file, uncomment the
+> `QBO_FILES_DIR=~/Claude` line and point it at the folder where your client
+> files live. This keeps every file the app reads or writes inside that one
+> folder. Attaching a document to a QuickBooks record requires it, because that
+> is the one action that sends a file off your computer.
 
 ## Step 6: Connect your companies (log in once, click Allow)
 
@@ -103,17 +115,24 @@ connector sees new companies the moment they're authorized.
 Open **Claude Desktop → Settings → Connectors**, click the **qbo** connector, and
 you'll see its **Tool permissions**.
 
+Every tool declares whether it only reads, whether it destroys anything, and
+whether running it twice is safe, so the list should already group sensibly.
+
 - **Read-only tools → Always allow.** They only look at the books: reports,
   lists, searches, `health_check`, `api_get`.
 - **Write tools → Needs approval.** They change the books, so keep a human in the
   loop: *Create invoice, Create bill, Create bill payment, Create journal entry,
   Void invoice, Import transactions from CSV*, and **`api_request`** (it can post
   anything, so never set it to Always allow).
+- **`Delete transaction` → Never**, unless you have a specific reason. Voiding
+  keeps the number trail; deleting does not.
 
-> **Extra safety already built in:** the app refuses to guess which company a
-> write targets, warns when a write lands in a closed period, keeps a local log
-> of every change it posts, and can enforce per-company rules (like read-only
-> clients) from a `qbo-policy.json` file.
+> **Extra safety already built in:** writes must name their company (setting an
+> active one covers reading, not posting), the app warns when a change lands in a
+> closed period — including edits to transactions already sitting in one — keeps a
+> local log of everything it posts, requires a preview before importing a bank
+> CSV, and can enforce per-company rules (like read-only clients) from a
+> `qbo-policy.json` file.
 
 ## Step 10: Try it
 
@@ -121,10 +140,15 @@ Ask Claude Desktop something like:
 
 - *"List my QuickBooks companies."*
 - *"Work on acme. Show me this year's profit and loss."*
-- *"Run a consolidated P&L across all my companies for last quarter."*
+- *"Put acme and bakery's P&L side by side for last quarter."*
 - *"Who owes bakery money? Pull the aged receivables."*
 
 If you get numbers back, you're done.
+
+> Notice the third one names both companies. The multi-company reports will not
+> default to "all of them", because adding unrelated clients together is rarely
+> what someone means, and the result would look like a real consolidation without
+> being one.
 
 ---
 
