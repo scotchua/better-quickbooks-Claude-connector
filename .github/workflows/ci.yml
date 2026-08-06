@@ -6,7 +6,10 @@ on:
   pull_request:
 
 jobs:
-  test:
+  # Named "unit", not "test", because a matrix job reports one check per leg:
+  # "unit (22)" and "unit (24)". The branch ruleset requires a single context
+  # called "test", which the `test` job below provides.
+  unit:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -36,3 +39,24 @@ jobs:
             if (bad.length) { console.error("Refusing to publish:", bad); process.exit(1); }
             console.log(`packaging clean (${files.length} files)`);
           '
+
+  # The single stable context the "protect-main" ruleset requires. It exists so
+  # the rule does not have to name matrix legs, which change whenever the
+  # supported Node versions do; adding a version to the matrix above needs no
+  # change here or in the ruleset.
+  #
+  # `if: always()` matters: without it this job is SKIPPED when a matrix leg
+  # fails, and a skipped required check never reports, so the PR waits forever
+  # instead of failing. Running always and exiting non-zero is what turns a
+  # failed matrix into a failed "test" check.
+  test:
+    needs: [unit]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every matrix leg to have succeeded
+        # A matrix job aggregates: needs.unit.result is 'success' only when
+        # every leg succeeded, and 'failure'/'cancelled'/'skipped' otherwise.
+        run: |
+          echo "unit result: ${{ needs.unit.result }}"
+          test "${{ needs.unit.result }}" = "success"
