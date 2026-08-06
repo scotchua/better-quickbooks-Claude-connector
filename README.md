@@ -347,33 +347,37 @@ Your companies now appear, and you can ask things like *"list my QuickBooks
 companies"* or *"show me last month's profit and loss for acme."*
 
 **Step 9 — Set tool permissions (recommended).**
-In Claude Desktop, open **Settings → Connectors**, click a `qbo-…` connector, and
-you'll see its **Tool permissions**. This controls when Claude acts on its own
+In Claude Desktop, open **Settings → Connectors**, click the **`qbo`** connector,
+and you'll see its **Tool permissions**. This controls when Claude acts on its own
 versus asking you first.
-
-![QuickBooks connector tool permissions in Claude Desktop](docs/images/tool-permissions.png)
 
 Each tool can be set to **Always allow** (✓), **Needs approval** (✋), or **Never**
 (⛔). Every tool tells Claude Desktop whether it only reads, whether it destroys
-anything, and whether running it twice is safe, so the list should already sort
-sensibly. Our recommendation:
+anything, and whether running it twice is safe, so the list should already group
+sensibly. What we'd set:
 
-- **Read-only tools → Always allow.** They only *look* at the books, so letting
-  them run freely keeps Claude fast. Examples: *List companies, Get profit and
-  loss, Get balance sheet, Get cash flow, Get aged receivables, Get invoices.*
-- **Write tools → Needs approval.** They *change* the books, so keep a human in
-  the loop — Claude pauses and asks before each. Examples: *Create invoice, Create
-  bill, Create bill payment, Create journal entry, Send invoice email, Void
-  invoice, Import transactions from CSV.*
-- **The two escape hatches differ:** `api_get` only reads, so it can be Always
-  allow. `api_request` can post anything to QuickBooks; keep it on **Needs
-  approval** (or Never).
-- **Firm-wide off switches:** set `QBO_DISABLE_WRITES=true` in `.env` and the
-  write tools are never registered at all (a read-only deployment for review
-  staff), or `QBO_DISABLE_DELETES=true` to hide just deletes and voids.
+| What the tools do | Examples | Set to | Why |
+|---|---|---|---|
+| Read the books | `get_profit_and_loss`, `get_balance_sheet`, `get_aged_receivables`, `get_invoices`, every `search_…` | **Always allow** | They only look. Approving each one slows Claude down and buys no safety. |
+| Check the setup | `health_check`, `list_companies`, `list_clients`, `resolve_client`, `get_company_policy` | **Always allow** | Read-only, and the first things you want working when something is broken. |
+| Read anything raw | `api_get` | **Always allow** | GET only. It cannot write, by construction. |
+| Post and edit | `create_invoice`, `create_bill`, `create_journal_entry`, `create_bill_payment`, every `update_…` | **Needs approval** | These change real books. One human look per posting. |
+| Leave the building | `send_invoice_email`, `send_estimate`, `send_sales_receipt`, `attach_file` | **Needs approval** | A client sees the result. You cannot un-send an email. |
+| Do many things at once | `import_transactions_from_csv`, `execute_batch`, `create_journal_entry_multi` | **Needs approval** | One approval covers many postings, which makes it the one most worth reading. |
+| Change the guardrails | `set_company_policy`, `connect_company`, `register_client` | **Needs approval** | They change what the connector is allowed to do next. |
+| Void | `void_invoice`, `void_payment`, `void_sales_receipt` | **Needs approval** | Zeroes the transaction but keeps the number trail, so it is recoverable. |
+| Delete permanently | `delete_transaction` | **Never** | Cannot be undone. Voiding is almost always the right move instead. |
+| Write anything raw | `api_request` | **Never** | It can send anything to QuickBooks, including things no other tool exposes. Turn it on only when you need it. |
 
 You get quick answers on anything that just reads, and a confirmation step on
-anything that posts. Repeat for each client connector.
+anything that posts. There is only one `qbo` connector, so you set this once, not
+once per client.
+
+**Firm-wide off switches.** Per-tool settings live in Claude Desktop; these live
+in `.env` and apply no matter what the app is asked to do. Set
+`QBO_DISABLE_WRITES=true` and the write tools are never registered at all (a
+read-only deployment for review staff), or `QBO_DISABLE_DELETES=true` to remove
+just the deletes and voids.
 
 Stuck on a step? Just tell Claude Code what happened — it can re-check the
 connection, re-authorize a company, or add another one for you.
