@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Lets CI be re-run on demand from the Actions tab or `gh workflow run ci.yml`,
+  # without an empty commit. Also the way to confirm the runner is healthy when
+  # a push does not appear to have triggered anything.
+  workflow_dispatch:
 
 jobs:
   # Named "unit", not "test", because a matrix job reports one check per leg:
