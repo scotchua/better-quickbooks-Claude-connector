@@ -46,13 +46,22 @@ the right file for that one company. It also knows whether each company is a tes
 We built a safety gate to stop that.
 
 - Every action can take a company name.
-- You can also set an active company first, so you don't repeat yourself.
+- You can also set an active company first, so you don't repeat yourself for
+  **reads**.
 - For anything that **changes** your books (like making an invoice or a journal
-  entry), the app will **not guess** the company. If you didn't say which one, it
-  stops and asks. Only harmless "read" actions may assume the company when there
-  is just one.
+  entry), the app will **not guess** the company, and by default it will not use
+  the active company either. You have to name the company on the call itself. If
+  you didn't, it stops and asks. Only harmless "read" actions may assume the
+  company when there is just one.
 
-So a payment or invoice cannot quietly land in the wrong company.
+Why writes are stricter: one copy of this app serves every Claude conversation
+you have open at once, so the "active company" is shared between them. If a
+write could inherit it, picking a client in one chat could redirect a write you
+made in another. Requiring the name on the write itself removes that path.
+
+If you turn that off (`QBO_REQUIRE_EXPLICIT_COMPANY=false`), writes go back to
+using the active company, and the shared-setting problem above comes back with
+them. That is a reasonable trade if you only ever have one chat open.
 
 ## Do the tokens expire?
 
@@ -62,8 +71,31 @@ again.
 
 ## Could my tokens show up in a log or a screen somewhere?
 
-The app writes its notes to a hidden channel, not the main output. Your tokens
-are never printed where Claude or you would normally see them.
+The app writes its notes to a hidden channel, not the main output, and it never
+prints your tokens there.
+
+One deliberate exception: the command `node src/index.js --access-token <name>`
+prints a one-hour access token, because its whole job is to hand that token to
+another program on your computer (the reporting scripts use it, so that only one
+program ever renews your login). It is not used during normal Claude work, every
+use is written to the audit log, and the long-lived refresh token is never
+printed.
+
+## Is every change really written down?
+
+Nearly. Each action that changes your books is appended to a local log in
+`audit-log/`, with the tool that ran, which company, Intuit's trace id, and what
+came back. Two honest caveats:
+
+- If that log **cannot be written** (bad folder, disk full), the accounting
+  action still goes through and the problem is reported to the hidden channel.
+  Setting `QBO_AUDIT=strict` turns that into a visible error instead. Even then
+  the change has already reached QuickBooks; strict makes the gap loud, it
+  cannot undo anything.
+- Setting `QBO_AUDIT=off` disables the log entirely.
+
+So the log is complete as long as it is enabled and writable, which is the
+normal case, but it is not a guarantee the app can enforce on its own.
 
 ## What is the difference between "sandbox" and "production"?
 

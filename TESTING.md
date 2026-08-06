@@ -19,12 +19,24 @@ npm install
 npm test
 ```
 
-**Pass:** `Tests 74 passed (74)`. This covers the security-critical logic:
-query escaping, CSV sign and date handling, token encryption round-trip and
+**Pass:** `Tests 156 passed (156)`. This covers the security-critical logic:
+query escaping, CSV sign and date handling, the import journal's crash-window
+resume, write-policy enforcement including its fail-closed behaviour on an
+unreadable or malformed policy file, destructive-path detection for the raw
+api_request escape hatch, the QBO_FILES_DIR fence including symlink escape,
+cross-process token-refresh locking, token encryption round-trip and
 tamper rejection, audit records, report consolidation, statement matching,
 duplicate clustering, policy enforcement, and filter allowlists.
 
-Then confirm the server starts and the safety switches work:
+The suite also includes `test/server-contract.test.js`, which starts the real
+server, speaks MCP over stdio, and asserts what a client actually receives: the
+full 114-tool surface, a description and input schema on every tool, correct
+read-only/destructive annotations, the reported version matching package.json,
+and both kill switches removing exactly the right tools. That is the only test
+exercising registration itself, so it is the one that catches a broken import or
+a mis-derived annotation before Claude Desktop does.
+
+You can still confirm startup by hand:
 
 ```bash
 node src/index.js < /dev/null            # ctrl-C after the startup line
@@ -33,7 +45,7 @@ QBO_DISABLE_DELETES=true node src/index.js < /dev/null
 ```
 
 **Pass:** the first prints `QBO MCP server running (stdio).`; the second reports
-about 45 write tools suppressed; the third reports 2.
+52 write tools suppressed; the third reports 4.
 
 ---
 

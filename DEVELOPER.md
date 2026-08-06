@@ -237,10 +237,29 @@ with the caller's parent pid). The refresh token never leaves this process.
   reconcile, attachments, PDF/attachment save paths) must resolve inside this
   directory tree; credential-shaped filenames (.env*, tokens*.json, keys) are
   refused regardless. Recommended: the client-files root, e.g. `~/Claude`.
-- `QBO_REQUIRE_EXPLICIT_COMPANY=true`: writes require an explicit `company`
-  argument on every call; session (`select_company`) and env defaults stop
-  applying to writes. Recommended when several conversations share the
-  connector, since the session default is process-global.
+  Symlinks are resolved before the containment check, so a link planted inside
+  the tree cannot be used to reach outside it. **`attach_file` requires this to
+  be set** — it reads a local file and uploads it into QuickBooks, so an
+  unconstrained path there is an exfiltration route, not just a mistake.
+  User-supplied write paths also refuse to replace an existing file unless the
+  tool is given `overwrite: true` (report `save_path` is exempt: reports are
+  regenerable and re-running a close to the same dated file is normal).
+- `QBO_CLIENT_ID_SANDBOX` / `QBO_CLIENT_SECRET_SANDBOX`: Intuit issues separate
+  development and production keys per app, and each pair only authenticates
+  against its own environment. Set these to serve sandbox companies alongside
+  production ones; the pair is selected per company from the environment stored
+  in its token file. With only `QBO_CLIENT_ID`/`QBO_CLIENT_SECRET` set, nothing
+  changes.
+- `QBO_AUDIT=strict`: raise an error when an audit record cannot be written,
+  instead of logging to stderr and continuing. The QuickBooks call has already
+  been sent by the time the record is written, so strict makes an unrecorded
+  write loud — it does not prevent or undo one.
+- `QBO_REQUIRE_EXPLICIT_COMPANY`: **defaults to true.** Writes require an
+  explicit `company` argument on every call; session (`select_company`) and env
+  defaults do not apply to writes. The session default is process-global and one
+  server serves every open conversation, so a `select_company` in one chat would
+  otherwise be able to retarget a write issued from another. Set it to `false`
+  for a single-operator setup that wants writes to inherit the defaults again.
 - Existing switches: `QBO_DISABLE_WRITES`, `QBO_DISABLE_DELETES`,
   `QBO_CLOSED_PERIOD=warn|block|off`, `QBO_POLICY_FILE`, `QBO_AUDIT=off`,
   `QBO_AUDIT_DIR`, `QBO_TIMEOUT_MS`, `QBO_PDF_MAX_BYTES`, `QBO_MINOR_VERSION`.

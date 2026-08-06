@@ -108,7 +108,7 @@ export function cleanRefreshToken(pasted) {
 export async function connectViaPlayground(slug, environment = "production", { openBrowserWindow = true } = {}) {
   const clean = sanitizeSlug(slug);
   if (!clean) throw new Error("Give a company slug of letters, numbers, or hyphens.");
-  credentials(); // fail early if .env lacks the app keys
+  credentials(environment); // fail early if .env lacks the app keys for this environment
 
   const existing = (await listCompanies()).find((c) => c.slug === clean);
   if (existing) {

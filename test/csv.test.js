@@ -1,5 +1,21 @@
-import { describe, it, expect } from "vitest";
-import { parseCSV, parseAmount, normalizeDate, planImport, importId, rowMarker } from "../src/csv.js";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtemp, writeFile, appendFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import {
+  parseCSV,
+  parseAmount,
+  normalizeDate,
+  planImport,
+  importId,
+  rowMarker,
+  parseRowMarker,
+  readJournal,
+  unconfirmedRows,
+  recordPreviewed,
+  recordIntent,
+  recordPosted,
+} from "../src/csv.js";
 
 describe("parseCSV", () => {
   it("handles quoted fields with commas and escaped quotes", () => {
@@ -91,5 +107,91 @@ describe("import identity", () => {
   });
   it("stamps a recognizable row marker", () => {
     expect(rowMarker("abc123", 7)).toBe("[import abc123 row 7]");
+  });
+  it("reads its own marker back off a PrivateNote", () => {
+    const note = `COFFEE SHOP ${rowMarker("abc123", 7)}`;
+    expect(parseRowMarker(note)).toEqual({ importId: "abc123", row: 7 });
+  });
+  it("returns null for notes with no marker", () => {
+    expect(parseRowMarker("just a memo")).toBeNull();
+    expect(parseRowMarker(null)).toBeNull();
+  });
+});
+
+// The journal is what stops a re-run from double-posting. The dangerous window
+// is between QBO committing a batch and the confirmation reaching this file:
+// those rows must come back as "unconfirmed" (go ask QuickBooks), never as
+// "not posted yet" (safe to send again).
+describe("import journal", () => {
+  let dir;
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "qbo-journal-"));
+    process.env.QBO_AUDIT_DIR = dir;
+  });
+  afterEach(() => {
+    delete process.env.QBO_AUDIT_DIR;
+  });
+
+  it("starts empty", async () => {
+    const j = await readJournal("aaa111");
+    expect(j.previewed).toBe(false);
+    expect([...j.posted]).toEqual([]);
+    expect([...unconfirmedRows(j)]).toEqual([]);
+  });
+
+  it("records a dry run so a live import can require one", async () => {
+    expect((await readJournal("aaa111")).previewed).toBe(false);
+    await recordPreviewed("aaa111", { rows_out: 3 });
+    expect((await readJournal("aaa111")).previewed).toBe(true);
+    // scoped to this import only
+    expect((await readJournal("bbb222")).previewed).toBe(false);
+  });
+
+  it("reports intent-without-confirmation as unconfirmed, not as unposted", async () => {
+    await recordIntent("aaa111", [2, 3, 4]);
+    await recordPosted("aaa111", [{ row: 2, purchase_id: "10" }]);
+    // rows 3 and 4 were sent to QBO and never confirmed: the crash window
+    const j = await readJournal("aaa111");
+    expect([...j.posted]).toEqual([2]);
+    expect([...unconfirmedRows(j)].sort()).toEqual([3, 4]);
+  });
+
+  it("clears unconfirmed rows once their outcome is journaled", async () => {
+    await recordIntent("aaa111", [3]);
+    await recordPosted("aaa111", [{ row: 3, purchase_id: "11" }]);
+    expect([...unconfirmedRows(await readJournal("aaa111"))]).toEqual([]);
+  });
+
+  it("keeps imports separate", async () => {
+    await recordIntent("aaa111", [1]);
+    await recordPosted("bbb222", [{ row: 9, purchase_id: "12" }]);
+    expect([...unconfirmedRows(await readJournal("aaa111"))]).toEqual([1]);
+    expect([...(await readJournal("bbb222")).posted]).toEqual([9]);
+  });
+
+  it("reads pre-`kind` records as posted rows, so an in-flight import resumes", async () => {
+    const file = path.join(dir, "imports-journal.jsonl");
+    await writeFile(file, JSON.stringify({ ts: "2026-08-01T00:00:00Z", import_id: "aaa111", row: 5, purchase_id: "99" }) + "\n");
+    expect([...(await readJournal("aaa111")).posted]).toEqual([5]);
+  });
+
+  it("skips corrupt lines rather than losing the whole journal", async () => {
+    await recordPosted("aaa111", [{ row: 1, purchase_id: "1" }]);
+    const file = path.join(dir, "imports-journal.jsonl");
+    await appendFile(file, "{ this is not json\n");
+    await recordPosted("aaa111", [{ row: 2, purchase_id: "2" }]);
+    expect([...(await readJournal("aaa111")).posted].sort()).toEqual([1, 2]);
+  });
+});
+
+describe("normalizeDate rejects impossible calendar dates", () => {
+  it("refuses a day that does not exist in that month", () => {
+    expect(normalizeDate("2026-02-31")).toBeNull();
+    expect(normalizeDate("2/31/2026")).toBeNull();
+    expect(normalizeDate("2025-02-29")).toBeNull();
+  });
+  it("still accepts a real leap day", () => {
+    expect(normalizeDate("2024-02-29")).toBe("2024-02-29");
+    expect(normalizeDate("2/29/2024")).toBe("2024-02-29");
   });
 });

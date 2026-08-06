@@ -15,6 +15,7 @@ import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { auditFilePath } from "./audit.js";
+import { isRealCalendarDate } from "./util.js";
 
 // ---- low-level CSV ----------------------------------------------------------
 
@@ -77,7 +78,11 @@ export function normalizeDate(raw) {
 function toISO(y, mo, d) {
   const month = Number(mo), day = Number(d);
   if (month < 1 || month > 12 || day < 1 || day > 31) return null;
-  return `${y}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  const iso = `${y}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  // Reject dates that pass the range check but do not exist (2026-02-31,
+  // 2025-02-29). A bank export should never contain one; if it does, the row
+  // belongs in the errors list rather than posted against a coerced date.
+  return isRealCalendarDate(iso) ? iso : null;
 }
 
 // ---- header detection -------------------------------------------------------
@@ -162,28 +167,72 @@ function journalPath() {
   return path.join(path.dirname(auditFilePath()), "imports-journal.jsonl");
 }
 
-// Rows already posted for this import_id (from prior, possibly partial, runs).
-export async function postedRows(importIdValue) {
+async function appendJournal(records) {
+  const file = journalPath();
+  await mkdir(path.dirname(file), { recursive: true });
+  const lines = records
+    .map((r) => JSON.stringify({ ts: new Date().toISOString(), ...r }))
+    .join("\n") + "\n";
+  await appendFile(file, lines, { encoding: "utf8", mode: 0o600 });
+}
+
+// Everything the journal knows about one import. Three record kinds:
+//   previewed  a dry run inspected this exact file against this exact target
+//   intent     rows handed to QBO in a batch that has not been confirmed yet
+//   posted     rows QBO confirmed, with the Purchase Ids it assigned
+//
+// `intent` exists because of a specific window: between QBO committing a batch
+// and the posted records reaching this file, a crash leaves those rows looking
+// unposted, and the obvious re-run posts them twice. Intent marks them
+// "unknown, go ask QuickBooks" instead. Records written before this journal had
+// a `kind` field are read as posted rows, so an in-flight import still resumes.
+export async function readJournal(importIdValue) {
   const posted = new Set();
+  const intended = new Set();
+  let previewed = false;
   try {
     const text = await readFile(journalPath(), "utf8");
     for (const line of text.split("\n")) {
       if (!line.trim()) continue;
-      try {
-        const rec = JSON.parse(line);
-        if (rec.import_id === importIdValue && rec.row != null) posted.add(rec.row);
-      } catch { /* skip corrupt line */ }
+      let rec;
+      try { rec = JSON.parse(line); } catch { continue; /* skip corrupt line */ }
+      if (rec.import_id !== importIdValue) continue;
+      if (rec.kind === "previewed") previewed = true;
+      else if (rec.kind === "intent") for (const r of rec.rows || []) intended.add(r);
+      else if (rec.row != null) posted.add(rec.row);
     }
   } catch { /* no journal yet */ }
-  return posted;
+  return { previewed, posted, intended };
+}
+
+// Rows announced to QBO whose outcome never made it back into the journal.
+export function unconfirmedRows({ posted, intended }) {
+  return new Set([...intended].filter((r) => !posted.has(r)));
+}
+
+// Rows already posted for this import_id (from prior, possibly partial, runs).
+export async function postedRows(importIdValue) {
+  return (await readJournal(importIdValue)).posted;
+}
+
+export async function recordPreviewed(importIdValue, meta = {}) {
+  await appendJournal([{ kind: "previewed", import_id: importIdValue, ...meta }]);
+}
+
+export async function recordIntent(importIdValue, rows) {
+  if (!rows.length) return;
+  await appendJournal([{ kind: "intent", import_id: importIdValue, rows }]);
 }
 
 export async function recordPosted(importIdValue, entries) {
   if (!entries.length) return;
-  const file = journalPath();
-  await mkdir(path.dirname(file), { recursive: true });
-  const lines = entries
-    .map((e) => JSON.stringify({ ts: new Date().toISOString(), import_id: importIdValue, ...e }))
-    .join("\n") + "\n";
-  await appendFile(file, lines, { encoding: "utf8", mode: 0o600 });
+  await appendJournal(entries.map((e) => ({ kind: "posted", import_id: importIdValue, ...e })));
+}
+
+// Read an import id and row number back out of a PrivateNote stamped by
+// rowMarker. This is what lets a posted transaction be recognized in
+// QuickBooks itself when the local journal is incomplete.
+export function parseRowMarker(note) {
+  const m = /\[import ([0-9a-f]+) row (\d+)\]/.exec(String(note ?? ""));
+  return m ? { importId: m[1], row: Number(m[2]) } : null;
 }

@@ -7,6 +7,9 @@ node_modules/
 tokens*.json
 .qbo-key*
 
+# Token-refresh lock files (transient; one per company while a refresh runs)
+.refresh-*.lock
+
 # Write guardrails (local, names clients). policy.js writes timestamped
 # backups as qbo-policy.json.bak-<stamp>, so the glob must be open-ended.
 qbo-policy.json

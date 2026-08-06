@@ -41,6 +41,13 @@ export function toNumber(v) {
 // Merge per-company flattened two-column reports (row name, amount) into one
 // side-by-side table with a cross-company total. Row order follows the first
 // company that produced each row.
+//
+// This is ARITHMETIC, not consolidation in the accounting sense. Rows are
+// matched by section-and-name string, so "Bank charges" and "Bank Charges "
+// land on separate rows while two unrelated companies' "Sales" add together.
+// There are no eliminations, no ownership test, no currency translation, and
+// no common chart of accounts. The output field is named combined_total rather
+// than total so nothing downstream reads it as a consolidated figure.
 export function consolidateReports(byCompany) {
   const keyOf = (r, name) => `${r.section}|${name}|${r.is_summary ? "S" : "R"}`;
   const order = [];
@@ -62,9 +69,16 @@ export function consolidateReports(byCompany) {
   const rows = order.map((k) => {
     const row = map.get(k);
     const total = companies.reduce((s, c) => s + (row.amounts[c] ?? 0), 0);
-    return { ...row, total: Number(total.toFixed(2)) };
+    return { ...row, combined_total: Number(total.toFixed(2)) };
   });
-  return { companies, rows };
+  return {
+    companies,
+    rows,
+    basis:
+      "Arithmetic combination of each company's own report. Rows are matched by account name, so a name that " +
+      "differs between files stays on its own row. No intercompany eliminations, no ownership test, no currency " +
+      "translation. Not a consolidation for reporting purposes.",
+  };
 }
 
 // Map a flattened General Ledger report to plain transaction rows. Column

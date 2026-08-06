@@ -101,7 +101,7 @@ export async function connectViaCatcher(slug, environment = "production", { open
   // Fail before opening a browser. Without this, missing keys produce an
   // authorize URL carrying an empty client_id, so the operator is sent to an
   // Intuit error page and asked to paste something they can never get.
-  credentials();
+  credentials(environment);
 
   const existing = (await listCompanies()).find((c) => c.slug === clean);
   if (existing) {

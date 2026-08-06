@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { deriveSlugFromRealm, sanitizeSlug } from "../src/qbo.js";
+import { deriveSlugFromRealm, sanitizeSlug, assertSlug } from "../src/qbo.js";
 import { compactList } from "../src/compact.js";
 
 describe("sanitizeSlug", () => {
@@ -36,5 +36,31 @@ describe("compactList", () => {
   it("returns raw rows when verbose or unknown entity", () => {
     expect(compactList("Invoice", [invoice], true)[0]).toBe(invoice);
     expect(compactList("Widget", [invoice])[0]).toBe(invoice);
+  });
+});
+
+// sanitizeSlug is lenient because it guards a filename and must never throw.
+// assertSlug is the boundary version: silently rewriting "advance!" to
+// "advance" would let a typo resolve to a real company's books.
+describe("assertSlug", () => {
+  it("accepts slugs that survive sanitizing unchanged", () => {
+    expect(assertSlug("advance-welding")).toBe("advance-welding");
+    expect(assertSlug("mhpe_2026")).toBe("mhpe_2026");
+    expect(assertSlug("  arrow  ")).toBe("arrow"); // surrounding space is not a typo
+  });
+
+  it("refuses anything that would be silently rewritten", () => {
+    expect(() => assertSlug("advance!")).toThrow(/not a valid company slug/);
+    expect(() => assertSlug("advance welding")).toThrow(/not a valid company slug/);
+    expect(() => assertSlug("../escape")).toThrow(/not a valid company slug/);
+    expect(() => assertSlug("arrow/../advance")).toThrow(/not a valid company slug/);
+  });
+
+  it("suggests the sanitized form when there is one", () => {
+    expect(() => assertSlug("advance!")).toThrow(/Did you mean "advance"/);
+  });
+
+  it("still refuses input that sanitizes to nothing", () => {
+    expect(() => assertSlug("!!!")).toThrow(/not a valid company slug/);
   });
 });

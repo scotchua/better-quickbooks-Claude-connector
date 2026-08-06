@@ -8,11 +8,17 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 18 and 20 are both past end-of-life; 22 is the supported baseline and
+        # 24 is current. See package.json engines.
+        node-version: [22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
       - name: Syntax check
@@ -21,3 +27,12 @@ jobs:
         run: npm test
       - name: Dependency audit
         run: npm audit --audit-level=high
+      - name: Packaging contains no secrets or local config
+        run: |
+          npm pack --dry-run --json > /tmp/pack.json
+          node -e '
+            const files = JSON.parse(require("fs").readFileSync("/tmp/pack.json","utf8"))[0].files.map(f => f.path);
+            const bad = files.filter(p => /^\.claude\/|^\.env$|^tokens.*\.json$|^qbo-policy\.json$|^clients\.json|^audit-log\/|\.lock$/.test(p));
+            if (bad.length) { console.error("Refusing to publish:", bad); process.exit(1); }
+            console.log(`packaging clean (${files.length} files)`);
+          '

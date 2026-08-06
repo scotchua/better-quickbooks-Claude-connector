@@ -24,25 +24,60 @@ export function policyPath() {
   return process.env.QBO_POLICY_FILE || path.join(ROOT, "qbo-policy.json");
 }
 
-// mtime-cached load; a missing or unreadable file means "no policy".
+// mtime-cached load. ONLY a missing file means "no policy". An unreadable or
+// malformed file THROWS, which blocks writes: the alternative is that one bad
+// hand-edit silently turns every read-only company, amount cap, and date floor
+// in this file into "no restrictions", with nothing anywhere saying so.
 export async function loadPolicy() {
-  try {
-    const p = policyPath();
-    const s = await stat(p);
-    // Key the cache on path AND mtime: two different files written within the
-    // same millisecond must not serve each other's rules.
-    if (cache.policy && cache.path === p && cache.mtimeMs === s.mtimeMs) return cache.policy;
-    const parsed = JSON.parse(await readFile(p, "utf8"));
-    cache.path = p;
-    cache.mtimeMs = s.mtimeMs;
-    cache.policy = parsed;
-    return parsed;
-  } catch {
+  const p = policyPath();
+  const forget = () => {
     cache.path = null;
     cache.mtimeMs = -1;
     cache.policy = null;
-    return null;
+  };
+
+  let s;
+  try {
+    s = await stat(p);
+  } catch (e) {
+    forget();
+    if (e.code === "ENOENT") return null; // no file: no rules, deliberately
+    throw new Error(
+      `Cannot read the write-policy file ${p} (${e.message}). Writes are blocked until it is readable. ` +
+      `Fix the permissions, or delete the file if these companies genuinely have no guardrails.`
+    );
   }
+
+  // Key the cache on path AND mtime: two different files written within the
+  // same millisecond must not serve each other's rules.
+  if (cache.policy && cache.path === p && cache.mtimeMs === s.mtimeMs) return cache.policy;
+
+  let raw;
+  try {
+    raw = (await readFile(p, "utf8")).trim();
+  } catch (e) {
+    forget();
+    throw new Error(
+      `Cannot read the write-policy file ${p} (${e.message}). Writes are blocked until it is readable.`
+    );
+  }
+
+  let parsed;
+  try {
+    // An empty file means "no rules", matching setCompanyPolicy's read path.
+    parsed = raw ? JSON.parse(raw) : {};
+  } catch (e) {
+    forget();
+    throw new Error(
+      `${p} is not valid JSON (${e.message}). Writes are blocked until it parses. ` +
+      `Fix the file (an empty object {} means "no rules") or move it aside.`
+    );
+  }
+
+  cache.path = p;
+  cache.mtimeMs = s.mtimeMs;
+  cache.policy = parsed;
+  return parsed;
 }
 
 export async function policyFor(slug) {

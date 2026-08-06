@@ -9,12 +9,12 @@
 
 import http from "node:http";
 import { exec } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { readFile, writeFile, readdir, rename, unlink } from "node:fs/promises";
+import { randomBytes, randomUUID, createHash } from "node:crypto";
+import { readFile, writeFile, readdir, rename, unlink, open, stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { encryptionEnabled, encryptTokens, decryptTokens, isEncrypted } from "./secure-store.js";
-import { record as auditRecord, summarizeResponse } from "./audit.js";
+import { record as auditRecord, summarizeResponse, currentToolName } from "./audit.js";
 import { checkWritePolicy } from "./policy.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -80,6 +80,23 @@ function sanitizeSlug(s) {
   return String(s ?? "").trim().replace(/[^a-zA-Z0-9_-]/g, "");
 }
 
+// sanitizeSlug stays lenient on purpose: it is the last line of defence before
+// a slug reaches a filename, and something that must never throw there. But
+// silently rewriting input is the wrong behaviour at the API boundary, where
+// "advance!" quietly becoming "advance" means a typo resolves to a real
+// company's books. Anything taking a slug from a person or a model uses this.
+function assertSlug(s) {
+  const raw = String(s ?? "").trim();
+  const clean = sanitizeSlug(raw);
+  if (raw !== clean) {
+    throw new Error(
+      `"${raw}" is not a valid company slug: only letters, numbers, hyphens, and underscores are allowed.` +
+      (clean ? ` Did you mean "${clean}"?` : "")
+    );
+  }
+  return clean;
+}
+
 // The --connect flow and no-arg callers fall back to this env-configured default.
 const DEFAULT_COMPANY = sanitizeSlug(process.env.QBO_COMPANY || "");
 
@@ -88,29 +105,39 @@ function tokensPathFor(slug) {
   return path.join(ROOT, clean ? `tokens.${clean}.json` : "tokens.json");
 }
 
-// Credentials + redirect come from the environment (one Intuit app per
-// connector). The API host, however, is derived per-company from each token
-// file's stored `environment` (see apiBaseFor) — so a single connector can serve
-// sandbox and production companies side by side, as long as they authorize under
-// the same app credentials.
-function credentials() {
+// Credentials + redirect come from the environment. Intuit issues SEPARATE
+// development and production keys for the same app, and each pair authenticates
+// only against its own environment, so a connector serving both needs both:
+//   QBO_CLIENT_ID / QBO_CLIENT_SECRET                  production, and the default
+//   QBO_CLIENT_ID_SANDBOX / QBO_CLIENT_SECRET_SANDBOX  used when the company's
+//                                                      token file says sandbox
+// Pass the target environment so the right pair is picked; with only one pair
+// configured this behaves exactly as it did before. The API host is chosen
+// separately, per company, in apiBaseFor.
+function credentials(environment) {
+  const sandbox = String(environment || "").toLowerCase() === "sandbox";
   const {
     QBO_CLIENT_ID,
     QBO_CLIENT_SECRET,
+    QBO_CLIENT_ID_SANDBOX,
+    QBO_CLIENT_SECRET_SANDBOX,
     QBO_REDIRECT_URI = "http://localhost:3000/callback",
   } = process.env;
 
-  if (!QBO_CLIENT_ID || !QBO_CLIENT_SECRET) {
+  const clientId = (sandbox && QBO_CLIENT_ID_SANDBOX) || QBO_CLIENT_ID;
+  const clientSecret = (sandbox && QBO_CLIENT_SECRET_SANDBOX) || QBO_CLIENT_SECRET;
+
+  if (!clientId || !clientSecret) {
     throw new Error(
       "Missing QBO_CLIENT_ID / QBO_CLIENT_SECRET. Copy .env.example to .env and fill in your "
       + "Intuit app keys (README Step 5), then run this again."
+      + (sandbox
+        ? " For sandbox companies you can also set QBO_CLIENT_ID_SANDBOX / QBO_CLIENT_SECRET_SANDBOX to your"
+          + " app's development keys; Intuit's production keys do not work against sandbox."
+        : "")
     );
   }
-  return {
-    clientId: QBO_CLIENT_ID,
-    clientSecret: QBO_CLIENT_SECRET,
-    redirectUri: QBO_REDIRECT_URI,
-  };
+  return { clientId, clientSecret, redirectUri: QBO_REDIRECT_URI };
 }
 
 // Environment used when authorizing a NEW company (no token file exists yet).
@@ -150,8 +177,16 @@ async function loadTokens(slug) {
     }
     return parsed;
   } catch (e) {
-    log(`Could not decrypt ${tokensPathFor(slug)}: ${e.message}`);
-    return null;
+    // Deliberately not null. Returning null made an undecryptable token file
+    // indistinguishable from a company that was never connected, so the error
+    // the operator saw said "run npm run connect" when the actual problem was
+    // a missing key — and re-authorizing to fix a key problem is the wrong move.
+    throw new Error(
+      `The token file ${tokensPathFor(slug)} exists but could not be decrypted (${e.message}). That usually means ` +
+      `the encryption key changed (different machine, cleared Keychain entry, or a different QBO_TOKEN_KEY), ` +
+      `NOT that this company was disconnected. Restore the original key if you can; otherwise re-authorize with ` +
+      `\`npm run connect:playground -- ${sanitizeSlug(slug)}\`.`
+    );
   }
 }
 
@@ -218,8 +253,8 @@ function openBrowser(url) {
 // Full first-run authorization: open browser, catch the redirect on localhost:3000,
 // exchange the code for tokens, save them to tokens.<DEFAULT_COMPANY>.json.
 async function runAuthorizationFlow() {
-  const creds = credentials();
   const environment = connectEnvironment();
+  const creds = credentials(environment);
   const slug = DEFAULT_COMPANY;
   const state = randomBytes(16).toString("hex");
   const redirect = new URL(creds.redirectUri);
@@ -354,12 +389,12 @@ function cancelAuthorization() {
 // `ttlMs` bounds how long the listener stays open, so an abandoned attempt
 // cannot leave a port bound for the life of the process.
 async function beginAuthorization({ company, environment, openBrowserWindow = true, ttlMs = 10 * 60_000 } = {}) {
-  const creds = credentials(); // throws early if .env is missing keys
   const slug = sanitizeSlug(company ?? "");
   const env = (environment || connectEnvironment()).toLowerCase();
   if (env !== "sandbox" && env !== "production") {
     throw new Error(`environment must be "sandbox" or "production", got "${environment}".`);
   }
+  const creds = credentials(env); // throws early if .env is missing keys
 
   const live = authorizationStatus();
   if (live.state === "waiting") {
@@ -462,13 +497,63 @@ export function chooseRefreshSource(onDisk, existing, force = false, now = Date.
     : { use: "existing", reason: "nothing usable on disk" };
 }
 
+// Intuit rotates the refresh token on every use and invalidates the one it
+// replaces, so the read-decide-exchange-write sequence below has to be atomic.
+// The in-flight Map further down only dedupes within ONE process; two processes
+// (Claude Desktop alongside Claude Code, or the --access-token broker racing a
+// tool call) can each exchange a token the other just invalidated, and the
+// company drops offline until someone re-authorizes. A lock file is the part
+// that crosses process boundaries.
+async function withRefreshLock(slug, fn) {
+  const lockPath = path.join(ROOT, `.refresh-${sanitizeSlug(slug) || "default"}.lock`);
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    try {
+      const fh = await open(lockPath, "wx"); // fails if it already exists
+      await fh.writeFile(String(process.pid));
+      await fh.close();
+      break;
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      try {
+        // Reclaim a lock left behind by a process that died mid-refresh.
+        const st = await stat(lockPath);
+        if (Date.now() - st.mtimeMs > 60_000) {
+          await unlink(lockPath);
+          continue;
+        }
+      } catch {
+        continue; // vanished between the open and the stat: go claim it
+      }
+      if (Date.now() > deadline) {
+        throw new Error(
+          `Timed out waiting for the token refresh lock (${lockPath}). Another process is refreshing this ` +
+          `company. If none is running, delete that file and retry.`
+        );
+      }
+      await sleep(100 + Math.floor(Math.random() * 200));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    try { await unlink(lockPath); } catch { /* already released */ }
+  }
+}
+
 async function refreshTokens(slug, existing, { force = false } = {}) {
+  return withRefreshLock(slug, () => refreshTokensLocked(slug, existing, force));
+}
+
+async function refreshTokensLocked(slug, existing, force) {
+  // Re-read INSIDE the lock: whoever held it before us may have just rotated
+  // the token, in which case theirs is the live one and ours is already dead.
   const onDisk = await loadTokens(slug);
   const choice = chooseRefreshSource(onDisk, existing, force);
   if (choice.use === "on-disk-fresh") return onDisk;
   const current = choice.use === "on-disk" ? onDisk : existing;
 
-  const creds = credentials();
+  const creds = credentials(current.environment);
   const body = new URLSearchParams({
     grant_type: "refresh_token",
     refresh_token: current.refresh_token,
@@ -577,9 +662,23 @@ async function qboRequest(pathAndQuery, { method = "GET", body, company } = {}) 
   const tokens = await getValidTokens(company ?? DEFAULT_COMPANY);
   const apiBase = apiBaseFor(tokens.environment);
   const sep = pathAndQuery.includes("?") ? "&" : "?";
+  // Intuit's idempotency key, on every write. Without it a timed-out or
+  // interrupted write is ambiguous: the caller cannot tell "never applied" from
+  // "applied, response lost", and the natural response (retry) posts the
+  // transaction twice. Replaying the SAME requestid returns the original
+  // outcome instead. It goes into the audit record so a deliberate retry can
+  // reuse it. Automatic retries for writes stay off in qboFetch until this is
+  // validated against a live company.
+  const requestId = method === "GET" ? undefined : randomUUID();
+  // Fingerprint of what was sent, so the audit log can answer "was this the
+  // same posting twice, or two different ones?" without storing client data.
+  const bodyHash = body
+    ? createHash("sha256").update(JSON.stringify(body)).digest("hex").slice(0, 16)
+    : undefined;
   const url =
     `${apiBase}/v3/company/${tokens.realmId}${pathAndQuery}` +
-    `${sep}minorversion=${MINOR_VERSION}`;
+    `${sep}minorversion=${MINOR_VERSION}` +
+    (requestId ? `&requestid=${requestId}` : "");
 
   const res = await qboFetch(url, {
     method,
@@ -606,6 +705,7 @@ async function qboRequest(pathAndQuery, { method = "GET", body, company } = {}) 
   if (method !== "GET") {
     await auditRecord({
       kind: "api_write",
+      tool: currentToolName(),
       method,
       path: pathAndQuery.split("?")[0],
       company: sanitizeSlug(company ?? DEFAULT_COMPANY) || "(default)",
@@ -614,6 +714,8 @@ async function qboRequest(pathAndQuery, { method = "GET", body, company } = {}) 
       status: res.status,
       ok: res.ok,
       intuit_tid: tid,
+      request_id: requestId,
+      body_sha256: bodyHash,
       ...(res.ok ? summarizeResponse(data) : { error: String(detail).slice(0, 500) }),
     });
   }
@@ -658,9 +760,14 @@ async function qboRequestBinary(pathAndQuery, { company, accept = "application/p
 // `formData` is a FormData with the file_metadata_0N / file_content_0N parts;
 // fetch sets the multipart boundary header itself.
 async function qboUpload(formData, { company } = {}) {
+  // An upload is a write, and it did not pass through qboRequest's gate. The
+  // body is multipart with no amount or date, so this is the read_only check;
+  // amount caps and date floors have nothing to act on here.
+  await checkWritePolicy(sanitizeSlug(company ?? DEFAULT_COMPANY), null);
   const tokens = await getValidTokens(company ?? DEFAULT_COMPANY);
   const apiBase = apiBaseFor(tokens.environment);
-  const url = `${apiBase}/v3/company/${tokens.realmId}/upload?minorversion=${MINOR_VERSION}`;
+  const requestId = randomUUID();
+  const url = `${apiBase}/v3/company/${tokens.realmId}/upload?minorversion=${MINOR_VERSION}&requestid=${requestId}`;
   const res = await qboFetch(url, {
     method: "POST",
     headers: { Authorization: `Bearer ${tokens.access_token}`, Accept: "application/json" },
@@ -672,6 +779,7 @@ async function qboUpload(formData, { company } = {}) {
   const tid = res.headers.get("intuit_tid") || undefined;
   await auditRecord({
     kind: "api_write",
+    tool: currentToolName(),
     method: "POST",
     path: "/upload",
     company: sanitizeSlug(company ?? DEFAULT_COMPANY) || "(default)",
@@ -680,6 +788,7 @@ async function qboUpload(formData, { company } = {}) {
     status: res.status,
     ok: res.ok,
     intuit_tid: tid,
+    request_id: requestId,
   });
   if (!res.ok) {
     const fault = data?.Fault?.Error?.[0];
@@ -703,7 +812,7 @@ async function disconnectCompany(slug) {
   if (!tokens?.refresh_token) {
     throw new Error(`No stored tokens for ${label}; nothing to disconnect.`);
   }
-  const creds = credentials();
+  const creds = credentials(tokens.environment);
   const res = await qboFetch(REVOKE_URL, {
     method: "POST",
     headers: {
@@ -737,7 +846,7 @@ function deriveSlugFromRealm(realmId, taken = new Set()) {
 // Exchange an authorization code for a token bundle (no realmId — that comes from
 // the callback query). Shared shape with runAuthorizationFlow's inline exchange.
 async function exchangeCodeForTokens(code, environment) {
-  const creds = credentials();
+  const creds = credentials(environment);
   const body = new URLSearchParams({
     grant_type: "authorization_code",
     code,
@@ -773,8 +882,8 @@ async function exchangeCodeForTokens(code, environment) {
 // The whole batch uses one environment (QBO_ENVIRONMENT); run separate batches
 // for sandbox vs production. Returns [{ slug, realmId, environment, reused }].
 async function runBatchAuthorization({ shouldContinue } = {}) {
-  const creds = credentials();
   const environment = connectEnvironment();
+  const creds = credentials(environment);
   const redirect = new URL(creds.redirectUri);
   const port = Number(redirect.port) || 3000;
 
@@ -865,5 +974,7 @@ export {
   deriveSlugFromRealm,
   listCompanies,
   sanitizeSlug,
+  assertSlug,
+  withRefreshLock,
   DEFAULT_COMPANY,
 };

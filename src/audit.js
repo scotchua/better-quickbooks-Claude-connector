@@ -6,20 +6,39 @@
 // This is the firm's local record of AI-performed bookkeeping: what was
 // posted, to which company, when, and Intuit's trace id for support.
 //
-// Disable with QBO_AUDIT=off; relocate with QBO_AUDIT_DIR.
+// QBO_AUDIT=on (default) | strict | off; relocate with QBO_AUDIT_DIR.
+//   on      a failed append is logged to stderr and the call continues
+//   strict  a failed append is raised to the caller (see record() for what
+//           that does and does not guarantee)
+//   off     no audit log at all
 
 import { appendFile, mkdir } from "node:fs/promises";
+import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 
+// Which tool is currently running. Audit records are built down in the API
+// layer, which has no idea what the caller actually asked for, and threading a
+// tool name through every one of the ~60 call sites would be pure noise. The
+// tool wrapper in index.js puts the name here; the API layer reads it back.
+export const toolContext = new AsyncLocalStorage();
+
+export function currentToolName() {
+  return toolContext.getStore()?.tool;
+}
+
 function auditDir() {
   return process.env.QBO_AUDIT_DIR || path.join(ROOT, "audit-log");
 }
 
+export function auditMode() {
+  return (process.env.QBO_AUDIT || "on").toLowerCase();
+}
+
 export function auditEnabled() {
-  return (process.env.QBO_AUDIT || "on").toLowerCase() !== "off";
+  return auditMode() !== "off";
 }
 
 export function auditFilePath(now = new Date()) {
@@ -33,7 +52,22 @@ export function auditFilePath(now = new Date()) {
 export function summarizeResponse(data) {
   if (!data || typeof data !== "object") return {};
   if (Array.isArray(data.BatchItemResponse)) {
-    return { entity: "Batch", count: data.BatchItemResponse.length };
+    // A bare count is not an accountability record: a 30-item batch where 11
+    // items failed and 19 posted needs to say which is which, or the log
+    // cannot answer "what did Claude actually change".
+    return {
+      entity: "Batch",
+      count: data.BatchItemResponse.length,
+      items: data.BatchItemResponse.map((res) => {
+        const fault = res.Fault?.Error?.[0];
+        if (fault) {
+          return { bId: res.bId, ok: false, error: String(fault.Message ?? "error").slice(0, 200) };
+        }
+        const key = Object.keys(res).find((k) => k !== "bId" && res[k] && typeof res[k] === "object");
+        const ent = key ? res[key] : null;
+        return { bId: res.bId, ok: true, entity: key ?? null, entityId: ent?.Id ?? null };
+      }),
+    };
   }
   for (const [k, v] of Object.entries(data)) {
     if (v && typeof v === "object" && !Array.isArray(v) && v.Id) {
@@ -47,10 +81,20 @@ export function summarizeResponse(data) {
   return {};
 }
 
-// Append one audit record. Never throws: an audit failure must not break the
-// underlying accounting call, so problems are logged to stderr instead.
+// Append one audit record.
+//
+// Default mode logs a failure to stderr and lets the accounting call stand: an
+// audit problem should not turn a posted transaction into an error the caller
+// might retry. QBO_AUDIT=strict raises it instead, for deployments where an
+// unrecorded write is itself the incident.
+//
+// What strict does NOT do is make the write conditional on the record. Audit
+// happens after the API responds, so by the time an append can fail the
+// transaction already exists in QuickBooks. Strict converts a silent gap in the
+// accountability trail into a loud one; it cannot roll anything back.
 export async function record(entry) {
-  if (!auditEnabled()) return;
+  const mode = auditMode();
+  if (mode === "off") return;
   try {
     const file = auditFilePath();
     await mkdir(path.dirname(file), { recursive: true });
@@ -58,5 +102,12 @@ export async function record(entry) {
     await appendFile(file, line, { encoding: "utf8", mode: 0o600 });
   } catch (e) {
     console.error("[qbo-audit] failed to write audit record:", e.message);
+    if (mode === "strict") {
+      throw new Error(
+        `Audit record could not be written (${e.message}) and QBO_AUDIT=strict. The QuickBooks call this ` +
+        `record describes HAS ALREADY BEEN SENT and is not undone by this error. Fix the audit directory, ` +
+        `then reconcile what was posted by hand.`
+      );
+    }
   }
 }

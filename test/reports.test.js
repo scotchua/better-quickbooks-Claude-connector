@@ -52,7 +52,7 @@ describe("consolidateReports", () => {
     expect(out.companies).toEqual(["acme", "bakery"]);
     const rent = out.rows.find((r) => r.name === "Rent");
     expect(rent.amounts).toEqual({ acme: 400, bakery: 250 });
-    expect(rent.total).toBe(650);
+    expect(rent.combined_total).toBe(650);
   });
   it("keeps rows missing from one company (partial amounts)", () => {
     const a = { company: "a", flat: flattenReport(pnl(100, "Rent", 50)) };
@@ -60,7 +60,7 @@ describe("consolidateReports", () => {
     const out = consolidateReports([a, b]);
     const rent = out.rows.find((r) => r.name === "Rent");
     expect(rent.amounts).toEqual({ a: 50 });
-    expect(rent.total).toBe(50);
+    expect(rent.combined_total).toBe(50);
     expect(out.rows.find((r) => r.name === "Software").amounts).toEqual({ b: 75 });
   });
 });

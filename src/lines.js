@@ -60,6 +60,22 @@ export const depositLineSchema = z.object({
   class: classArg,
 });
 
+// QuickBooks treats Amount as authoritative and does not recompute it from
+// Qty x UnitPrice. Send all three inconsistently and it accepts them, then
+// prints an invoice whose own line arithmetic is visibly wrong to the customer.
+// Nothing downstream catches that, so catch it here.
+function assertLineFoots(li, kind) {
+  if (li.quantity == null || li.unit_price == null || li.amount == null) return;
+  const expected = Number((li.quantity * li.unit_price).toFixed(2));
+  if (Math.abs(expected - Number(li.amount)) > 0.005) {
+    throw new Error(
+      `${kind} line does not foot: quantity ${li.quantity} x unit price ${li.unit_price} is ` +
+      `${expected.toFixed(2)}, but amount is ${li.amount}. QuickBooks would post the amount and print the ` +
+      `mismatch. Correct one of the three, or omit quantity and unit_price to send the amount alone.`
+    );
+  }
+}
+
 // ---- shared resolution helpers ----------------------------------------------
 
 async function classRef(name, company) {
@@ -122,6 +138,7 @@ export async function buildJournalLines(lines, company) {
 export async function buildSalesLines(lines, company) {
   const out = [];
   for (const li of lines) {
+    assertLineFoots(li, "Sales");
     const detail = {};
     if (li.item) detail.ItemRef = await resolveRef("Item", li.item, company, "Name");
     else { const it = await findAnyServiceItem(company); if (it) detail.ItemRef = { value: it.Id, name: it.Name }; }
@@ -157,6 +174,7 @@ export async function buildAccountLines(lines, company) {
 export async function buildItemExpenseLines(lines, company) {
   const out = [];
   for (const li of lines) {
+    assertLineFoots(li, "Item");
     const detail = { ItemRef: await resolveRef("Item", li.item, company, "Name") };
     if (li.quantity != null) detail.Qty = li.quantity;
     if (li.unit_price != null) detail.UnitPrice = li.unit_price;

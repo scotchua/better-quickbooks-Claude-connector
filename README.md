@@ -119,10 +119,14 @@ QuickBooks (Intuit). That means:
   Keychain or Windows protected storage, so a copied token file is useless on
   its own. Offboarding a client? `npm run disconnect -- <nickname>` revokes the
   access with Intuit and removes the file.
-- **Every change is written down.** Each action that changes your books is
-  recorded in a local log (`audit-log/`), so you can always answer "what did
-  Claude post, and when." Writes dated into a closed period come back with a
-  warning.
+- **Changes are written down.** Each action that changes your books is recorded
+  in a local log (`audit-log/`) with the tool that ran, the company, and
+  Intuit's trace id, so you can answer "what did Claude post, and when." If the
+  log itself cannot be written the accounting action still goes through and the
+  problem is reported to the log channel; `QBO_AUDIT=strict` turns that into a
+  visible error instead (see SECURITY.md). Writes dated into a closed period
+  come back with a warning, including edits to transactions already sitting in
+  a closed period.
 
 ### Keeping the login safe
 

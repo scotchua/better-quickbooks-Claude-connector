@@ -1,4 +1,28 @@
 import { describe, it, expect } from "vitest";
+import { isDestructiveOperation, isRealCalendarDate } from "../src/util.js";
+
+// This predicate is what holds the api_request escape hatch to the same rules
+// as the named delete_/void_ tools. A shape it fails to recognize is a delete
+// that slips past QBO_DISABLE_DELETES and past the amount/date policy.
+describe("isDestructiveOperation", () => {
+  it("recognizes every destructive shape QBO accepts", () => {
+    expect(isDestructiveOperation("/invoice?operation=delete")).toBe(true);
+    expect(isDestructiveOperation("/invoice?operation=void")).toBe(true);
+    // the payment-void form, which is an update with an include flag
+    expect(isDestructiveOperation("/payment?operation=update&include=void")).toBe(true);
+    expect(isDestructiveOperation("/salesreceipt?minorversion=75&operation=delete")).toBe(true);
+    expect(isDestructiveOperation("/invoice?OPERATION=DELETE")).toBe(true);
+  });
+  it("leaves ordinary writes and reads alone", () => {
+    expect(isDestructiveOperation("/invoice")).toBe(false);
+    expect(isDestructiveOperation("/query?query=SELECT * FROM Bill")).toBe(false);
+    expect(isDestructiveOperation("/reports/GeneralLedger?start_date=2026-01-01")).toBe(false);
+    expect(isDestructiveOperation("/payment?operation=update")).toBe(false);
+    // a customer whose name merely contains the word
+    expect(isDestructiveOperation("/query?query=SELECT * FROM Customer WHERE Name = 'Void Ltd'")).toBe(false);
+    expect(isDestructiveOperation(undefined)).toBe(false);
+  });
+});
 import { esc, assertId, normalizeName, assertBalanced, guessContentType, expandHome } from "../src/util.js";
 
 describe("esc", () => {
@@ -61,5 +85,30 @@ describe("expandHome", () => {
   });
   it("leaves absolute paths alone", () => {
     expect(expandHome("/tmp/x.csv")).toBe("/tmp/x.csv");
+  });
+});
+
+// A YYYY-MM-DD shape check accepts dates that do not exist. QuickBooks then
+// either 400s opaquely or coerces them, and a coerced date silently lands a
+// transaction in the wrong period.
+describe("isRealCalendarDate", () => {
+  it("accepts real dates including leap days", () => {
+    expect(isRealCalendarDate("2026-08-05")).toBe(true);
+    expect(isRealCalendarDate("2024-02-29")).toBe(true); // leap year
+    expect(isRealCalendarDate("2026-12-31")).toBe(true);
+  });
+  it("rejects dates that pass a regex but do not exist", () => {
+    expect(isRealCalendarDate("2026-02-31")).toBe(false);
+    expect(isRealCalendarDate("2025-02-29")).toBe(false); // not a leap year
+    expect(isRealCalendarDate("2026-04-31")).toBe(false);
+    expect(isRealCalendarDate("2026-13-01")).toBe(false);
+    expect(isRealCalendarDate("2026-00-10")).toBe(false);
+    expect(isRealCalendarDate("2026-01-00")).toBe(false);
+  });
+  it("rejects anything not in YYYY-MM-DD form", () => {
+    expect(isRealCalendarDate("8/5/2026")).toBe(false);
+    expect(isRealCalendarDate("2026-8-5")).toBe(false);
+    expect(isRealCalendarDate("")).toBe(false);
+    expect(isRealCalendarDate(null)).toBe(false);
   });
 });
