@@ -306,8 +306,12 @@ with the caller's parent pid). The refresh token never leaves this process.
 - **Fleet tools** merge per-company report trees by account name;
   `create_journal_entry_multi` requires an explicit company list and returns
   per-company results.
-- **Reconciliation** matches statement rows to Purchases/Deposits on exact
-  amount within a date tolerance; transfers and bill payments are not scanned.
+- **Reconciliation** builds the register from one account-filtered
+  `GeneralLedger` call rather than per-entity queries, so every type that hits
+  the account is covered and the signs come from the ledger instead of an
+  entity's `Credit` flag. Statement rows match on exact amount within a date
+  tolerance; `bankTieOut` then produces the two-column bridge. Cleared status
+  is not available in the API, so nothing is marked reconciled in QuickBooks.
 - Name-index lookups (fuzzy matching, suggestions) are cached for 60 seconds
   per company and entity; exact-name lookups always hit the API directly.
 - **Verb-category kill switches** (pattern from Intuit's MIT MCP server):

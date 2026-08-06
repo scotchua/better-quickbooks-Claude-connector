@@ -92,7 +92,9 @@ import {
   recordPosted,
 } from "./csv.js";
 import { flattenReport, consolidateReports, glFlatten, flagGlRows, reportReceipt } from "./reports.js";
-import { matchTransactions, findDuplicateGroups } from "./reconcile.js";
+import { matchTransactions, findDuplicateGroups, bankRegisterFromGl, bankTieOut } from "./reconcile.js";
+import { planInvoiceAllocations, planBillPaymentApplication } from "./allocate.js";
+import { extractLinks, summarizeTxn, describeChain, READABLE_TXN_TYPES } from "./links.js";
 import { checkWritePolicy, policyFor, setCompanyPolicy, policyPath } from "./policy.js";
 import { roster, resolveClient, registerClient, clientsPath } from "./clients.js";
 
@@ -1071,19 +1073,21 @@ registerTool(
 
 registerTool(
   "get_general_ledger",
-  "General Ledger report for a date range — every account's transactions with running balances.",
+  "General Ledger report for a date range — every account's transactions with running balances. Narrow it to one account with `account`, which also returns that account's opening balance.",
   {
     start_date: isoDate.optional().describe("YYYY-MM-DD"),
     end_date: isoDate.optional().describe("YYYY-MM-DD"),
+    account: z.string().optional().describe("Limit to one account (name or Id). Cuts a whole-file GL down to one ledger."),
     accounting_method: accountingMethodArg,
     date_macro: dateMacroArg,
     columns: z.string().optional().describe("Comma-separated columns to include, e.g. \"tx_date,account_name,debt_amt,credit_amt\""),
     save_path: savePathArg,
     company: companyArg,
   },
-  tool(async ({ start_date, end_date, accounting_method, date_macro, columns, save_path, company }) => {
+  tool(async ({ start_date, end_date, account, accounting_method, date_macro, columns, save_path, company }) => {
     const c = await resolveCompany(company);
-    const q = reportQuery({ start_date, end_date, accounting_method, date_macro, columns });
+    const accountId = account ? (await resolveRef("Account", account, c, "Name")).value : undefined;
+    const q = reportQuery({ start_date, end_date, account: accountId, accounting_method, date_macro, columns });
     return reportResult(await qboRequest(`/reports/GeneralLedger${q}`, { company: c }), save_path);
   })
 );
@@ -2083,28 +2087,74 @@ registerTool(
 
 registerTool(
   "create_payment",
-  "Record a customer payment, optionally applied to a specific invoice.",
+  "Record a customer payment. Apply it to one invoice with invoice_id, or split it across several with `allocations` (invoice Id plus amount per invoice, partial amounts allowed). An allocated payment is previewed and not posted until you pass confirm: true.",
   {
     customer_ref: z.string().describe("Customer Id or DisplayName"),
     // Positive, like create_bill_payment and create_transfer already are. A
     // negative customer payment is a refund, which is its own entity type.
     amount: z.number().positive(),
-    invoice_id: z.string().optional().describe("Invoice to apply the payment to"),
+    invoice_id: z.string().optional().describe("Single-invoice form: the invoice to apply the whole payment to"),
+    allocations: z.array(z.object({
+      invoice_id: z.string(),
+      amount: z.number().positive(),
+    })).min(1).optional().describe("Split form: how much of the payment lands on each invoice. Must sum to `amount`."),
+    confirm: z.boolean().optional().describe("Required to post an allocated payment. Without it the allocation is only previewed."),
+    deposit_to_account: z.string().optional().describe("Bank or Undeposited Funds account (name/Id). Omit to let QBO choose its default."),
     txn_date: isoDate.optional(),
     memo: z.string().optional(),
     company: companyArg,
   },
-  tool(async ({ customer_ref, amount, invoice_id, txn_date, memo, company }) => {
-    const c = await resolveCompany(company, { write: true });
+  tool(async ({ customer_ref, amount, invoice_id, allocations, confirm, deposit_to_account, txn_date, memo, company }) => {
+    if (invoice_id && allocations) {
+      throw new Error("Pass invoice_id for a single invoice or allocations for a split, not both.");
+    }
+    // A preview must not need write access, or the safety step is gated behind
+    // the very permission it exists to make safe.
+    const previewOnly = Boolean(allocations) && confirm !== true;
+    const c = await resolveCompany(company, { write: !previewOnly });
     const warnings = await closedPeriodWarnings(c, [txn_date]);
-    const payload = { CustomerRef: await resolveRef("Customer", customer_ref, c, "DisplayName"), TotalAmt: amount };
-    if (invoice_id) {
+    const customer = await resolveRef("Customer", customer_ref, c, "DisplayName");
+
+    let allocationPlan = null;
+    if (allocations) {
+      const invoices = [];
+      for (const a of allocations) {
+        invoices.push(await fetchEntity("Invoice", a.invoice_id, c));
+      }
+      allocationPlan = planInvoiceAllocations({
+        allocations, invoices, total: amount, customerId: customer.value,
+      });
+      if (previewOnly) {
+        return asText(withWarnings({
+          company: c,
+          preview: true,
+          posted: false,
+          customer: customer.name ?? customer.value,
+          payment_amount: amount,
+          allocation: allocationPlan.plan,
+          invoices_closed: allocationPlan.invoices_closed,
+          next_step: "Check each open_balance and balance_after, then call again with confirm: true to post.",
+        }, warnings));
+      }
+    }
+
+    const payload = { CustomerRef: customer, TotalAmt: amount };
+    if (allocationPlan) payload.Line = allocationPlan.lines;
+    else if (invoice_id) {
       payload.Line = [{ Amount: amount, LinkedTxn: [{ TxnId: assertId(invoice_id, "invoice_id"), TxnType: "Invoice" }] }];
     }
+    if (deposit_to_account) payload.DepositToAccountRef = await resolveRef("Account", deposit_to_account, c, "Name");
     if (txn_date) payload.TxnDate = txn_date;
     if (memo) payload.PrivateNote = memo;
     const r = await qboRequest(`/payment`, { method: "POST", body: payload, company: c });
-    return asText(withWarnings({ company: c, created: r.Payment }, warnings));
+    // UnappliedAmt is QBO's own answer to "did this land where I meant it to",
+    // so it is surfaced rather than left for the caller to dig out.
+    return asText(withWarnings({
+      company: c,
+      created: r.Payment,
+      ...(allocationPlan ? { allocation: allocationPlan.plan, invoices_closed: allocationPlan.invoices_closed } : {}),
+      unapplied_amount: r.Payment?.UnappliedAmt ?? null,
+    }, warnings));
   })
 );
 
@@ -2586,50 +2636,80 @@ registerTool(
 
 registerTool(
   "create_bill_payment",
-  "Pay one or more bills (or record an unapplied vendor payment) by check or credit card. Completes the AP cycle: create_bill enters the liability, this pays it.",
+  "Pay one or more bills (or record an unapplied vendor payment) by check or credit card, optionally applying open vendor credits so only the net leaves the bank. Completes the AP cycle: create_bill enters the liability, this pays it. Applying credits is previewed and not posted until you pass confirm: true.",
   {
     vendor_name: z.string().describe("Vendor name or Id"),
-    amount: z.number().positive(),
+    amount: z.number().positive().describe("Cash actually leaving the account. Vendor credits are on top of this, not inside it."),
     payment_account: z.string().describe("Bank account (Check) or credit card account (CreditCard), name or Id"),
     payment_type: z.enum(["Check", "CreditCard"]),
-    bill_ids: z.array(z.string()).optional().describe("Bill Ids to apply the payment to, in order; the amount is allocated across their open balances"),
+    bill_ids: z.array(z.string()).optional().describe("Bill Ids to apply the payment to, in order; cash plus any credits is allocated across their open balances"),
+    vendor_credit_ids: z.array(z.string()).optional().describe("Open vendor credits to apply, in order. Each is applied in full. Requires bill_ids."),
+    confirm: z.boolean().optional().describe("Required to post when vendor_credit_ids is used. Without it the application is only previewed."),
     txn_date: isoDate.optional().describe("YYYY-MM-DD"),
     memo: z.string().optional(),
     company: companyArg,
   },
-  tool(async ({ vendor_name, amount, payment_account, payment_type, bill_ids, txn_date, memo, company }) => {
-    const c = await resolveCompany(company, { write: true });
+  tool(async ({ vendor_name, amount, payment_account, payment_type, bill_ids, vendor_credit_ids, confirm, txn_date, memo, company }) => {
+    if (vendor_credit_ids?.length && !bill_ids?.length) {
+      throw new Error("vendor_credit_ids needs bill_ids: a credit is applied against specific bills, not on its own.");
+    }
+    const previewOnly = Boolean(vendor_credit_ids?.length) && confirm !== true;
+    const c = await resolveCompany(company, { write: !previewOnly });
     const warnings = await closedPeriodWarnings(c, [txn_date]);
-    const payload = {
-      VendorRef: await resolveRef("Vendor", vendor_name, c),
-      TotalAmt: amount,
-      PayType: payment_type,
-    };
+    const vendorRef = await resolveRef("Vendor", vendor_name, c);
+
+    let application = null;
+    if (bill_ids?.length) {
+      const bills = [];
+      for (const id of bill_ids) bills.push(await fetchEntity("Bill", id, c));
+      const credits = [];
+      for (const id of vendor_credit_ids || []) credits.push(await fetchEntity("VendorCredit", id, c));
+      // Applying one vendor's credit to another vendor's bill is not something
+      // QBO will stop, and it is invisible once posted.
+      for (const rec of [...bills, ...credits]) {
+        const owner = String(rec.VendorRef?.value ?? "");
+        if (owner && owner !== String(vendorRef.value)) {
+          throw new Error(
+            `${rec.DocNumber ? `Document ${rec.DocNumber}` : `Id ${rec.Id}`} belongs to ${rec.VendorRef?.name || `vendor ${owner}`}, not the vendor being paid.`
+          );
+        }
+      }
+      application = planBillPaymentApplication({ bills, credits, amount });
+
+      if (previewOnly) {
+        return asText(withWarnings({
+          company: c,
+          preview: true,
+          posted: false,
+          vendor: vendorRef.name ?? vendorRef.value,
+          cash_paid: application.cash_paid,
+          credits_applied: application.credits_applied,
+          total_settled: application.total_settled,
+          bills: application.bills,
+          credits: application.credits,
+          next_step: "Check that cash_paid plus credits_applied settles the bills as intended, then call again with confirm: true to post.",
+        }, warnings));
+      }
+    }
+
+    const payload = { VendorRef: vendorRef, TotalAmt: amount, PayType: payment_type };
     const acctRef = await resolveRef("Account", payment_account, c, "Name");
     if (payment_type === "Check") payload.CheckPayment = { BankAccountRef: acctRef };
     else payload.CreditCardPayment = { CCAccountRef: acctRef };
-
-    if (bill_ids?.length) {
-      let remaining = amount;
-      const lines = [];
-      for (const id of bill_ids) {
-        const bill = await fetchEntity("Bill", id, c);
-        const open = Number(bill.Balance || 0);
-        const applied = Math.min(remaining, open);
-        if (applied > 0) {
-          lines.push({ Amount: Number(applied.toFixed(2)), LinkedTxn: [{ TxnId: bill.Id, TxnType: "Bill" }] });
-          remaining = Number((remaining - applied).toFixed(2));
-        }
-      }
-      if (remaining > 0.005) {
-        throw new Error(`Payment of ${amount} exceeds the open balance of the listed bills by ${remaining.toFixed(2)}. Lower the amount or add more bills.`);
-      }
-      payload.Line = lines;
-    }
+    if (application) payload.Line = application.lines;
     if (txn_date) payload.TxnDate = txn_date;
     if (memo) payload.PrivateNote = memo;
     const r = await qboRequest(`/billpayment`, { method: "POST", body: payload, company: c });
-    return asText(withWarnings({ company: c, created: r.BillPayment }, warnings));
+    return asText(withWarnings({
+      company: c,
+      created: r.BillPayment,
+      ...(application ? {
+        cash_paid: application.cash_paid,
+        credits_applied: application.credits_applied,
+        bills: application.bills,
+        credits: application.credits,
+      } : {}),
+    }, warnings));
   })
 );
 
@@ -2854,21 +2934,66 @@ registerTool(
   })
 );
 
-/* ===================== RECONCILIATION & REVIEW (3) ======================== */
+/* ===================== RECONCILIATION & REVIEW (4) ======================== */
+
+registerTool(
+  "get_transaction_links",
+  "Explain how one transaction connects to others: which invoices a payment was applied to and for how much, which bills and vendor credits a bill payment settled, what an invoice was paid by, which estimate an invoice came from. QuickBooks records the relationship on both ends, so this works from either side. Read-only.",
+  {
+    txn_type: z.enum([
+      "Invoice", "Bill", "BillPayment", "Payment", "CreditMemo", "VendorCredit",
+      "Deposit", "Estimate", "SalesReceipt", "PurchaseOrder", "JournalEntry",
+      "Purchase", "RefundReceipt",
+    ]).describe("Entity type of the transaction to start from"),
+    txn_id: z.string().describe("Its QBO Id"),
+    company: companyArg,
+  },
+  tool(async ({ txn_type, txn_id, company }) => {
+    const c = await resolveCompany(company);
+    const entity = await fetchEntity(txn_type, txn_id, c);
+    const links = extractLinks(entity);
+
+    const resolved = [];
+    for (const l of links) {
+      if (!READABLE_TXN_TYPES.has(l.txn_type)) {
+        // A real relationship QBO will not let the query endpoint address.
+        // Saying so beats dropping it or failing the whole call.
+        resolved.push({ ...l, note: `${l.txn_type} is not readable through the query API; only the link is known.` });
+        continue;
+      }
+      try {
+        resolved.push({ ...l, ...summarizeTxn(await fetchEntity(l.txn_type, l.txn_id, c)) });
+      } catch (e) {
+        resolved.push({ ...l, error: e.message });
+      }
+    }
+
+    const summary = summarizeTxn(entity);
+    return asText({
+      company: c || "(default)",
+      transaction: { txn_type, ...summary },
+      link_count: resolved.length,
+      links: resolved,
+      explanation: describeChain(txn_type, summary, resolved),
+      note: "amount_applied is present only on the side that records it (a payment's lines). Its absence means the amount lives on the other document, not that nothing was applied.",
+    });
+  })
+);
 
 registerTool(
   "reconcile_bank_csv",
-  "Compare a bank-statement CSV against the QBO register for that bank account: what matches, what is on the statement but not in the books, and what is in the books but not on the statement. Matches on exact amount within a date tolerance. Read-only.",
+  "Reconciliation worksheet for one bank account: compares a bank-statement CSV against the full QBO register (built from the account's General Ledger, so transfers, bill payments, journal entries, directly-deposited payments, sales receipts and refunds are all included). Reports matches, deposits in transit, outstanding items, and anything on the statement that is not in the books. Pass statement_ending_balance to get a full tie-out. Read-only; it does not mark anything reconciled in QuickBooks.",
   {
     file_path: z.string(),
     bank_account_name: z.string(),
     start_date: isoDate.optional().describe("YYYY-MM-DD (default: earliest statement date)"),
     end_date: isoDate.optional().describe("YYYY-MM-DD (default: latest statement date)"),
+    statement_ending_balance: z.number().optional().describe("Closing balance printed on the statement. Supply it to compute the tie-out; without it only the unmatched lists are produced."),
     date_tolerance_days: z.number().int().min(0).max(14).optional().describe("Default 2"),
     amount_convention: z.enum(["negative_out", "positive_out"]).optional(),
     company: companyArg,
   },
-  tool(async ({ file_path, bank_account_name, start_date, end_date, date_tolerance_days, amount_convention, company }) => {
+  tool(async ({ file_path, bank_account_name, start_date, end_date, statement_ending_balance, date_tolerance_days, amount_convention, company }) => {
     const c = await resolveCompany(company);
     const fileBytes = await readFile(await resolveUserPath(file_path));
     const plan = planImport(parseCSV(fileBytes.toString("utf8")), { amountConvention: amount_convention });
@@ -2886,30 +3011,53 @@ registerTool(
     const to = end_date || allDates[allDates.length - 1];
     if (!from || !to) throw new Error("The CSV has no readable rows to reconcile.");
 
-    const purchases = await qboQueryAll(
-      `SELECT * FROM Purchase WHERE AccountRef = '${bank.Id}' AND TxnDate >= '${esc(from)}' AND TxnDate <= '${esc(to)}'`,
-      "Purchase", { company: c }
+    // One account-filtered General Ledger call IS the register: every entity
+    // that hits this account is in it by construction, and it carries the
+    // opening and running balances a tie-out needs. The previous
+    // Purchase-plus-Deposit scan missed transfers, bill payments, journal
+    // entries, directly-deposited payments, sales receipts and refunds, and
+    // mis-signed vendor refunds by reading every Purchase as money out.
+    const rep = await qboRequest(
+      `/reports/GeneralLedger${reportQuery({
+        start_date: from,
+        end_date: to,
+        account: bank.Id,
+        columns: "tx_date,txn_type,doc_num,name,memo,split_acc,subt_nat_amount,rbal_nat_amount",
+      })}`,
+      { company: c }
     );
-    const deposits = await qboQueryAll(
-      `SELECT * FROM Deposit WHERE DepositToAccountRef = '${bank.Id}' AND TxnDate >= '${esc(from)}' AND TxnDate <= '${esc(to)}'`,
-      "Deposit", { company: c }
-    );
-    const registerOut = purchases.rows.map((p) => ({
-      id: p.Id, type: "Purchase", date: p.TxnDate, amount: Number(p.TotalAmt || 0),
-      payee: p.EntityRef?.name ?? null, memo: p.PrivateNote ?? null,
-    }));
-    const registerIn = deposits.rows.map((d) => ({
-      id: d.Id, type: "Deposit", date: d.TxnDate, amount: Number(d.TotalAmt || 0), memo: d.PrivateNote ?? null,
-    }));
+    const register = bankRegisterFromGl(glFlatten(flattenReport(rep)));
+
+    // Natural sign on a bank account: positive is money in. The matcher works
+    // in positive magnitudes on both sides, so split first and take absolutes.
+    const registerIn = register.transactions.filter((t) => t.amount > 0);
+    const registerOut = register.transactions
+      .filter((t) => t.amount < 0)
+      .map((t) => ({ ...t, amount: Math.abs(t.amount) }));
 
     const tolerance = { toleranceDays: date_tolerance_days ?? 2 };
     const outflows = matchTransactions(plan.outflows, registerOut, tolerance);
     const inflows = matchTransactions(plan.inflows, registerIn, tolerance);
+    const tie_out = bankTieOut({
+      statementEndingBalance: statement_ending_balance,
+      glEndingBalance: register.ending_balance,
+      outflows,
+      inflows,
+    });
 
     return asText({
       company: c || "(default)",
       bank_account: bank.Name,
       period: { from, to },
+      register: {
+        source: "GeneralLedger report filtered to this account",
+        opening_balance: register.beginning_balance,
+        net_activity: register.net_activity,
+        closing_balance: register.ending_balance,
+        transactions: register.transactions.length,
+        types_seen: [...new Set(register.transactions.map((t) => t.type).filter(Boolean))].sort(),
+      },
+      tie_out,
       outflows: {
         matched: outflows.matched.length,
         on_statement_not_in_books: outflows.statement_only,
@@ -2920,8 +3068,10 @@ registerTool(
         on_statement_not_in_books: inflows.statement_only,
         in_books_not_on_statement: inflows.register_only,
       },
-      truncated: purchases.truncated || deposits.truncated || undefined,
-      note: "Register scan covers Purchases and Deposits on this account. Transfers and bill payments are not scanned and can explain leftovers. Statement-only outflows can be imported with import_transactions_from_csv.",
+      note:
+        statement_ending_balance == null
+          ? "No statement_ending_balance was given, so the tie-out balances are null. Pass it to prove the difference is zero. Statement-only outflows can be imported with import_transactions_from_csv."
+          : "This is a worksheet, not a QuickBooks reconciliation: the Accounting API does not expose or set cleared status, so nothing here is marked reconciled in QuickBooks. Statement-only outflows can be imported with import_transactions_from_csv.",
     });
   })
 );
@@ -2965,21 +3115,23 @@ registerTool(
 
 registerTool(
   "get_general_ledger_flat",
-  "General Ledger as flat transaction rows (account, date, type, num, name, memo, split, amount) instead of QBO's nested report tree. Optional review flags mark weekend postings, large or round amounts, and journal entries. Built for review and analysis passes.",
+  "General Ledger as flat transaction rows (account, date, type, num, name, memo, split, amount, and the QBO transaction id) instead of QBO's nested report tree. Optional review flags mark weekend postings, large or round amounts, and journal entries. Built for review and analysis passes.",
   {
     start_date: isoDate.optional().describe("YYYY-MM-DD"),
     end_date: isoDate.optional().describe("YYYY-MM-DD"),
+    account: z.string().optional().describe("Limit to one account (name or Id)"),
     date_macro: dateMacroArg,
     accounting_method: accountingMethodArg,
     flags: z.boolean().optional().describe("Attach review-heuristic flags (default true)"),
     save_path: savePathArg,
     company: companyArg,
   },
-  tool(async ({ start_date, end_date, date_macro, accounting_method, flags, save_path, company }) => {
+  tool(async ({ start_date, end_date, account, date_macro, accounting_method, flags, save_path, company }) => {
     const c = await resolveCompany(company);
+    const accountId = account ? (await resolveRef("Account", account, c, "Name")).value : undefined;
     const q = reportQuery({
-      start_date, end_date, date_macro, accounting_method,
-      columns: "tx_date,txn_type,doc_num,name,memo,split_acc,subt_nat_amount",
+      start_date, end_date, account: accountId, date_macro, accounting_method,
+      columns: "tx_date,txn_type,doc_num,name,memo,split_acc,subt_nat_amount,rbal_nat_amount",
     });
     const rep = await qboRequest(`/reports/GeneralLedger${q}`, { company: c });
     let rows = glFlatten(flattenReport(rep));

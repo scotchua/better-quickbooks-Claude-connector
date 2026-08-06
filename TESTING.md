@@ -214,14 +214,26 @@ Do this on the firm's own books first, never a client's.
 
 ## Known limitations to test around
 
-- **Reconciliation** scans Purchases and Deposits on the account. Transfers and
-  bill payments are not scanned, so they can explain leftover items.
+- **Reconciliation is a worksheet, not a QuickBooks reconciliation.** The
+  register is built from the account's General Ledger, so every transaction
+  type that touches the account is covered (transfers, bill payments, journal
+  entries, directly-deposited payments, sales receipts, refunds). What it
+  cannot do is mark anything cleared: the Accounting API neither exposes nor
+  sets reconciliation status, so the QuickBooks Reconcile screen still has to
+  be worked by hand, and an edit to a previously reconciled transaction is
+  invisible here. Pass `statement_ending_balance` to get the tie-out; without
+  it you get the unmatched lists only.
 - **Change data capture** covers roughly the last 30 days only.
 - **Duplicate detection** flags candidates, not conclusions. Legitimate repeats
   (rent, subscriptions) look identical to duplicates.
-- **Inventory quantity adjustments** and **payroll runs** are not exposed by
-  Intuit's accounting API; those stay in the QuickBooks UI and your payroll
-  system.
+- **Inventory quantity adjustments** are not exposed *by this connector*. They
+  are available in Intuit's Accounting API through the `InventoryAdjustment`
+  entity, which is queryable today under the standard accounting scope; the
+  connector simply does not wrap it yet. Reach it with `api_get` or `query` for
+  reads. (An earlier version of this file said the API did not support them at
+  all. That was wrong.)
+- **Payroll runs** genuinely are not exposed by Intuit's accounting API; those
+  stay in the QuickBooks UI and your payroll system.
 - **`delete_transaction` is permanent.** Prefer `void_invoice` for invoices so
   the number trail survives.
 

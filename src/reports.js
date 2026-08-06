@@ -5,6 +5,17 @@
 // one into { columns, rows } where each row carries its section path; the
 // consolidation and GL helpers build on that.
 
+// QBO hangs the entity id of a cell off the cell itself, not the value: a
+// General Ledger row's "Transaction Type" cell carries the id of the
+// transaction that produced it. Dropping those ids made every report row
+// unlinkable back to the record it came from, which is what a reconciliation
+// or a drill-down needs. `ids` is attached only when a row actually has one,
+// so rows from reports that carry none (a P&L) keep their previous shape.
+function idsOf(colData) {
+  const ids = colData.map((c) => (c.id === "" || c.id == null ? null : c.id));
+  return ids.some((v) => v != null) ? ids : null;
+}
+
 export function flattenReport(report) {
   const columns = (report?.Columns?.Column || []).map((c) => c.ColTitle || c.ColType || "");
   const rows = [];
@@ -14,17 +25,21 @@ export function flattenReport(report) {
       if (row.Rows || row.type === "Section") {
         walk(row.Rows, header ? [...path, header] : path);
         if (row.Summary?.ColData?.length) {
+          const ids = idsOf(row.Summary.ColData);
           rows.push({
             section: path.join(" > "),
             is_summary: true,
             values: row.Summary.ColData.map((c) => c.value ?? ""),
+            ...(ids ? { ids } : {}),
           });
         }
       } else if (row.ColData) {
+        const ids = idsOf(row.ColData);
         rows.push({
           section: path.join(" > "),
           is_summary: false,
           values: row.ColData.map((c) => c.value ?? ""),
+          ...(ids ? { ids } : {}),
         });
       }
     }
@@ -94,6 +109,7 @@ export function glFlatten(flat) {
     else if (t.includes("memo") || t.includes("description")) idx.memo ??= i;
     else if (t.includes("split")) idx.split ??= i;
     else if (t.includes("amount")) idx.amount ??= i;
+    else if (t.includes("balance")) idx.balance ??= i;
     else if (t.includes("name")) idx.name ??= i;
   });
   const out = [];
@@ -103,6 +119,10 @@ export function glFlatten(flat) {
     const amount = toNumber(get("amount"));
     const date = get("date");
     if (!date && amount == null) continue; // decorative rows ("Beginning Balance" etc. keep a date or amount)
+    // The id lives on the Transaction Type cell, which is why it is read from
+    // the type column rather than the row as a whole.
+    const id = idx.type != null ? r.ids?.[idx.type] ?? null : null;
+    const balance = toNumber(get("balance"));
     out.push({
       account: r.section,
       date,
@@ -112,6 +132,8 @@ export function glFlatten(flat) {
       memo: get("memo"),
       split: get("split"),
       amount,
+      ...(id != null ? { id } : {}),
+      ...(balance != null ? { balance } : {}),
     });
   }
   return out;

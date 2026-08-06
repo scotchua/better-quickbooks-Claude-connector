@@ -31,6 +31,16 @@ describe("flattenReport", () => {
   it("handles empty reports", () => {
     expect(flattenReport({}).rows).toEqual([]);
   });
+  it("leaves rows without entity ids exactly as they were", () => {
+    for (const r of flattenReport(pnl(1000, "Rent", 400)).rows) expect(r).not.toHaveProperty("ids");
+  });
+  it("keeps entity ids alongside the values when a row carries them", () => {
+    const withIds = {
+      Columns: { Column: [{ ColTitle: "Date" }, { ColTitle: "Transaction Type" }] },
+      Rows: { Row: [{ ColData: [{ value: "2026-08-03" }, { value: "Deposit", id: "24862" }] }] },
+    };
+    expect(flattenReport(withIds).rows[0].ids).toEqual([null, "24862"]);
+  });
 });
 
 describe("toNumber", () => {
@@ -90,6 +100,22 @@ describe("glFlatten + flags", () => {
     const [je, coffee] = flagGlRows(glFlatten(flattenReport(gl)));
     expect(je.flags).toEqual(expect.arrayContaining(["weekend", "round_amount", "large", "journal_entry"]));
     expect(coffee.flags).toBeUndefined();
+  });
+  it("carries the transaction id and running balance through when the report has them", () => {
+    const withIds = {
+      Columns: { Column: [
+        { ColTitle: "Date" }, { ColTitle: "Transaction Type" }, { ColTitle: "Amount" }, { ColTitle: "Balance" },
+      ] },
+      Rows: { Row: [{ ColData: [
+        { value: "2026-08-03" }, { value: "Deposit", id: "24862" }, { value: "633.43" }, { value: "115740.11" },
+      ] }] },
+    };
+    expect(glFlatten(flattenReport(withIds))[0]).toMatchObject({ id: "24862", amount: 633.43, balance: 115740.11 });
+  });
+  it("omits id and balance rather than emitting nulls when the report lacks them", () => {
+    const row = glFlatten(flattenReport(gl))[0];
+    expect(row).not.toHaveProperty("id");
+    expect(row).not.toHaveProperty("balance");
   });
 });
 

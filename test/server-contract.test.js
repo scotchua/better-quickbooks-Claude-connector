@@ -70,7 +70,13 @@ describe("MCP server contract", () => {
   const byName = (n) => tools.find((t) => t.name === n);
 
   it("registers the full tool surface", () => {
-    expect(tools.length).toBe(114);
+    expect(tools.length).toBe(115);
+  });
+
+  // Traversal reads the graph and changes nothing, so a host should be able to
+  // auto-approve it alongside the other reads.
+  it("treats the link traversal tool as a read", () => {
+    expect(byName("get_transaction_links").annotations.readOnlyHint).toBe(true);
   });
 
   it("gives every tool a description and an input schema", () => {
