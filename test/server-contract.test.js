@@ -8,6 +8,7 @@
 // listing tools never calls Intuit.
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn } from "node:child_process";
+import { writeFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -61,6 +62,21 @@ async function listTools(env = {}) {
   } finally {
     server.stop();
   }
+}
+
+async function initialize(server) {
+  await server.call("initialize", {
+    protocolVersion: "2024-11-05",
+    capabilities: {},
+    clientInfo: { name: "contract-test", version: "1" },
+  });
+}
+
+async function callTool(server, name, args = {}) {
+  const res = await server.call("tools/call", { name, arguments: args });
+  let body;
+  try { body = JSON.parse(res.result.content[0].text); } catch { body = null; }
+  return { ...res.result, body };
 }
 
 describe("MCP server contract", () => {
@@ -174,4 +190,82 @@ describe("MCP server kill switches", () => {
       expect(names, n).toContain(n);
     }
   }, 20_000);
+});
+
+describe("company response provenance", () => {
+  const fixtures = [
+    ["provenance-a", "1000000000000001"],
+    ["provenance-b", "1000000000000002"],
+  ];
+
+  beforeAll(async () => {
+    const future = Date.now() + 3_600_000;
+    for (const [slug, realmId] of fixtures) {
+      await writeFile(path.join(ROOT, `tokens.${slug}.json`), JSON.stringify({
+        access_token: "test-access-token",
+        refresh_token: "test-refresh-token",
+        expires_at: future,
+        realmId,
+        environment: "sandbox",
+      }));
+    }
+  });
+
+  afterAll(async () => {
+    await Promise.all(fixtures.map(([slug]) => rm(path.join(ROOT, `tokens.${slug}.json`), { force: true })));
+  });
+
+  it("labels an explicit company with the slug and realm that served it", async () => {
+    const server = startServer();
+    try {
+      await initialize(server);
+      const result = await callTool(server, "get_company_info", { company: "provenance-a" });
+      expect(result.isError).toBe(true);
+      expect(result.body.company_provenance).toEqual({
+        slug: "provenance-a",
+        realmId: "1000000000000001",
+        source: "explicit",
+      });
+    } finally {
+      server.stop();
+    }
+  }, 20_000);
+
+  it("keeps select_company as a disclosed process default", async () => {
+    const server = startServer();
+    try {
+      await initialize(server);
+      await callTool(server, "select_company", { company: "provenance-b" });
+      const result = await callTool(server, "get_company_info");
+      expect(result.isError).toBe(true);
+      expect(result.body.company_provenance).toEqual({
+        slug: "provenance-b",
+        realmId: "1000000000000002",
+        source: "process_default",
+      });
+    } finally {
+      server.stop();
+    }
+  }, 20_000);
+
+  it("fails when an explicit slug resolves to another company's realm", async () => {
+    const duplicate = path.join(ROOT, "tokens.provenance-mismatch.json");
+    await writeFile(duplicate, JSON.stringify({
+      access_token: "test-access-token",
+      refresh_token: "test-refresh-token",
+      expires_at: Date.now() + 3_600_000,
+      realmId: "1000000000000001",
+      environment: "sandbox",
+    }));
+    const server = startServer();
+    try {
+      await initialize(server);
+      const result = await callTool(server, "get_company_info", { company: "provenance-mismatch" });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/Resolved company mismatch/);
+    } finally {
+      server.stop();
+      await rm(duplicate, { force: true });
+    }
+  });
 });

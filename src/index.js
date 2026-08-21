@@ -291,10 +291,41 @@ if (process.argv.includes("--disconnect")) {
 }
 
 // ---- helpers ---------------------------------------------------------------
-const asText = (obj) => ({ content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj, null, 2) }] });
+function asText(obj) {
+  const provenance = toolContext.getStore()?.companyProvenance;
+  let value = obj;
+  if (provenance?.length) {
+    const company_provenance = provenance.length === 1 ? provenance[0] : provenance;
+    if (typeof obj === "string") {
+      try {
+        const parsed = JSON.parse(obj);
+        value = parsed && typeof parsed === "object"
+          ? { ...parsed, company_provenance }
+          : { result: parsed, company_provenance };
+      } catch {
+        value = { result: obj, company_provenance };
+      }
+    } else {
+      value = obj && typeof obj === "object"
+        ? { ...obj, company_provenance }
+        : { result: obj, company_provenance };
+    }
+  }
+  return { content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }] };
+}
 
 const asError = (msg) => ({
-  content: [{ type: "text", text: `Error: ${msg}` }],
+  content: [{
+    type: "text",
+    text: (() => {
+      const provenance = toolContext.getStore()?.companyProvenance;
+      if (!provenance?.length) return `Error: ${msg}`;
+      return JSON.stringify({
+        error: msg,
+        company_provenance: provenance.length === 1 ? provenance[0] : provenance,
+      }, null, 2);
+    })(),
+  }],
   isError: true,
 });
 
@@ -378,21 +409,33 @@ function envDefaultCompany() {
   return sanitizeSlug(process.env.QBO_COMPANY || "");
 }
 
-// Writes require an explicit per-call company argument, and this is the
-// DEFAULT. The session default (select_company) and the env default are
-// process-global, and one server process serves every open conversation: a
-// select_company in one chat would otherwise silently retarget a write issued
-// from another. Set QBO_REQUIRE_EXPLICIT_COMPANY=false to let writes inherit
-// those defaults again (single-operator setups only).
-const REQUIRE_EXPLICIT_COMPANY =
-  (process.env.QBO_REQUIRE_EXPLICIT_COMPANY || "true").toLowerCase() !== "false";
+async function recordCompanyProvenance(slug, source) {
+  const tokens = await getValidTokens(slug);
+  const companies = await listCompanies();
+  const served = companies.find((company) => String(company.realmId) === String(tokens.realmId));
+  const resolved = served?.slug ?? slug;
+  if (source === "explicit" && resolved !== slug) {
+    throw new Error(
+      `Resolved company mismatch: requested "${slug}" but realm ${tokens.realmId} belongs to "${resolved || "(default)"}".`
+    );
+  }
+  const store = toolContext.getStore();
+  if (store) {
+    store.companyProvenance ??= [];
+    if (!store.companyProvenance.some((entry) => entry.slug === resolved && entry.realmId === String(tokens.realmId))) {
+      store.companyProvenance.push({ slug: resolved, realmId: String(tokens.realmId), source });
+    }
+  }
+}
 
 // Resolve which company a call targets, enforcing the precedence + write-gate.
 // Returns a concrete slug string ("" = the legacy default tokens.json).
 async function resolveCompany(explicit, { write = false } = {}) {
+  let slug;
+  let source;
   // 1. Explicit per-call argument — validated against what's actually authorized.
   if (explicit != null && String(explicit).trim() !== "") {
-    const slug = assertSlug(explicit);
+    slug = assertSlug(explicit);
     const companies = await listCompanies();
     if (!companies.some((c) => c.slug === slug)) {
       throw new Error(
@@ -400,28 +443,21 @@ async function resolveCompany(explicit, { write = false } = {}) {
       );
     }
     if (write) await checkWritePolicy(slug, null); // fail fast on read-only companies
-    return slug;
-  }
-  if (write && REQUIRE_EXPLICIT_COMPANY) {
-    throw new Error(
-      "Writes need an explicit `company` argument on every call. The session default (select_company) and the " +
-      "env default are shared by every conversation using this connector, so they are not trusted to aim a write. " +
-      `Available: ${formatCompanyList(await listCompanies())}. ` +
-      "(QBO_REQUIRE_EXPLICIT_COMPANY=false in .env restores the old behaviour.)"
-    );
+    source = "explicit";
   }
   // 2. Session default (set via select_company).
-  if (sessionDefault) {
+  else if (sessionDefault) {
     if (write) await checkWritePolicy(sessionDefault, null);
-    return sessionDefault;
+    slug = sessionDefault;
+    source = "process_default";
   }
   // 3. Env default (legacy per-connector QBO_COMPANY). Validated against what
   // is actually authorized, the same way an explicit argument is: a stale
   // QBO_COMPANY otherwise surfaces much later as "not connected", which points
   // at the wrong problem. Skipped for the pure-legacy single-tokens.json setup,
   // where there are no per-slug companies to match against.
-  const envDefault = envDefaultCompany();
-  if (envDefault) {
+  else if (envDefaultCompany()) {
+    const envDefault = envDefaultCompany();
     const known = await listCompanies();
     if (known.length && !known.some((x) => x.slug === envDefault)) {
       throw new Error(
@@ -430,19 +466,31 @@ async function resolveCompany(explicit, { write = false } = {}) {
       );
     }
     if (write) await checkWritePolicy(envDefault, null);
-    return envDefault;
+    slug = envDefault;
+    source = "process_default";
   }
   // 4. Convenience fallbacks.
-  const companies = await listCompanies();
-  if (companies.length === 0) return ""; // pure legacy single-file / default connector
-  if (companies.length === 1 && !write) return companies[0].slug;
-  // 5. Ambiguous — never guess.
-  const why = write
-    ? "I won't guess which company to post a write to"
-    : "multiple companies are connected";
-  throw new Error(
-    `No company selected — ${why}. Pass a \`company\` argument or call select_company first. Available: ${formatCompanyList(companies)}.`
-  );
+  else {
+    const companies = await listCompanies();
+    if (companies.length === 0) {
+      slug = ""; // pure legacy single-file / default connector
+      source = "process_default";
+    } else if (companies.length === 1 && !write) {
+      slug = companies[0].slug;
+      source = "process_default";
+    } else {
+      // 5. Ambiguous — never guess.
+      const why = write
+        ? "I won't guess which company to post a write to"
+        : "multiple companies are connected";
+      throw new Error(
+        `No company selected — ${why}. Pass a \`company\` argument or call select_company first. Available: ${formatCompanyList(companies)}.`
+      );
+    }
+  }
+
+  await recordCompanyProvenance(slug, source);
+  return slug;
 }
 
 // ---- MCP server ------------------------------------------------------------
@@ -2846,6 +2894,7 @@ async function consolidatedReport(reportName, targetCompanies, params) {
       continue;
     }
     try {
+      await recordCompanyProvenance(slug, "explicit");
       const rep = await qboRequest(`/reports/${reportName}${reportQuery(params)}`, { company: slug });
       byCompany.push({ company: slug, flat: flattenReport(rep) });
       try {
@@ -2931,6 +2980,7 @@ registerTool(
           throw new Error(`No such company "${raw}". Available: ${formatCompanyList(known)}.`);
         }
         await checkWritePolicy(slug, null);
+        await recordCompanyProvenance(slug, "explicit");
         const warnings = await closedPeriodWarnings(slug, [txn_date]);
         const payload = { Line: await buildJournalLines(lines, slug) };
         if (txn_date) payload.TxnDate = txn_date;

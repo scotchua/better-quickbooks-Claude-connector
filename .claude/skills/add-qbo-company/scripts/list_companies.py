@@ -42,8 +42,6 @@ def main() -> int:
     for fp in sorted(glob.glob(os.path.join(proj, "tokens.*.json"))):
         base = os.path.basename(fp)
         slug = base[len("tokens."):-len(".json")]
-        if slug in ("sandbox-backup",):  # known non-company backup name
-            continue
         try:
             with open(fp) as f:
                 d = json.load(f)

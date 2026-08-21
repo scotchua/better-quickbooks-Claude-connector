@@ -20,6 +20,7 @@ import os
 import platform
 import shutil
 import sys
+import re
 from datetime import datetime
 
 
@@ -33,6 +34,10 @@ def config_path() -> str:
         appdata = os.environ.get("APPDATA", os.path.join(home, "AppData", "Roaming"))
         return os.path.join(appdata, "Claude", "claude_desktop_config.json")
     return os.path.join(home, ".config", "Claude", "claude_desktop_config.json")
+
+
+def valid_slug(value: str) -> bool:
+    return re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", value or "") is not None
 
 
 def main() -> int:
@@ -56,8 +61,12 @@ def main() -> int:
         return 1
 
     env = {}
-    if args.slug:
-        slug = args.slug.strip()
+    if args.slug is not None:
+        slug = args.slug
+        if not valid_slug(slug):
+            print("ERROR: --slug must use only lowercase a-z, 0-9, and single "
+                  "hyphens between non-empty segments.", file=sys.stderr)
+            return 1
         server_key = f"qbo-{slug}"
         env["QBO_COMPANY"] = slug
         print("NOTE: per-company connectors are the legacy mode. The unified `qbo` "
