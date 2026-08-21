@@ -227,7 +227,7 @@ stderr. This is the ONLY supported way for another local process to reach
 QuickBooks with this connector's authorizations: Intuit rotates the refresh
 token on every refresh and invalidates the one it replaces, so exactly one
 process (this server) ever refreshes. The Python services under
-`~/Claude/qbo-collector` call this and cache the one-hour access token per
+`~/Claude/platform/qbo-collector` call this and cache the one-hour access token per
 realm. Every issuance is written to the audit log (`kind: token_brokered`,
 with the caller's parent pid). The refresh token never leaves this process.
 

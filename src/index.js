@@ -1289,9 +1289,10 @@ registerTool(
     email: z.string().optional(),
     phone: z.string().optional(),
     billing_address: z.string().optional(),
+    active: z.boolean().optional().describe("false retires the customer. QBO refuses if the customer carries an open balance or has sub-customers, and reactivating restores the record and its name."),
     company: companyArg,
   },
-  tool(async ({ customer_id, display_name, email, phone, billing_address, company }) => {
+  tool(async ({ customer_id, display_name, email, phone, billing_address, active, company }) => {
     const c = await resolveCompany(company, { write: true });
     const current = (await qboQuery(`SELECT * FROM Customer WHERE Id = '${assertId(customer_id, "customer_id")}'`, { company: c })).Customer?.[0];
     if (!current) throw new Error(`No customer with Id ${customer_id}`);
@@ -1300,6 +1301,7 @@ registerTool(
     if (email) payload.PrimaryEmailAddr = { Address: email };
     if (phone) payload.PrimaryPhone = { FreeFormNumber: phone };
     if (billing_address) payload.BillAddr = { Line1: billing_address };
+    if (active != null) payload.Active = active;
     const r = await qboRequest(`/customer`, { method: "POST", body: payload, company: c });
     return asText({ company: c, updated: r.Customer });
   })
