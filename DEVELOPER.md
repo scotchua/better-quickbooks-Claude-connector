@@ -92,7 +92,7 @@ Windows (use `node.exe`, and **double** every backslash in JSON):
 }
 ```
 Fully **quit and reopen** Claude Desktop. `qbo` appears under
-**Settings → Connectors** with all 114 tools.
+**Settings → Connectors** with all 115 tools.
 
 ## Multiple companies (one connector)
 
@@ -137,7 +137,7 @@ troubleshooting reference. After the first setup, adding a company needs no
 restart. Legacy per-company `qbo-<slug>` connectors still work; the scripts
 report them and support migration to the unified entry.
 
-## Tools (114)
+## Tools (115)
 
 **Added 2026-08-02** (16): get_preferences, get_aged_receivables_detail,
 get_aged_payables_detail, get_profit_and_loss_detail, get_inventory_valuation,

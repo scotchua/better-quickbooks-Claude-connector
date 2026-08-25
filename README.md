@@ -32,7 +32,7 @@ This tool is built for the other end of that:
   bill payments, deposits, transfers, credit memos, the chart of accounts, class
   and location tagging — the things you actually do in QuickBooks all day, not a
   handful of common ones.
-- **114 tools** covering reports, transactions, searches with typed filters,
+- **115 tools** covering reports, transactions, searches with typed filters,
   bill payments, invoice and estimate PDFs, attachments, change tracking,
   reconciliation, side-by-side multi-company reporting, diagnostics, and a safe
   bulk CSV import. Connecting a new client happens in the chat: Claude hands you an

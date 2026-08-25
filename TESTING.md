@@ -30,7 +30,7 @@ duplicate clustering, policy enforcement, and filter allowlists.
 
 The suite also includes `test/server-contract.test.js`, which starts the real
 server, speaks MCP over stdio, and asserts what a client actually receives: the
-full 114-tool surface, a description and input schema on every tool, correct
+full 115-tool surface, a description and input schema on every tool, correct
 read-only/destructive annotations, the reported version matching package.json,
 and both kill switches removing exactly the right tools. That is the only test
 exercising registration itself, so it is the one that catches a broken import or
