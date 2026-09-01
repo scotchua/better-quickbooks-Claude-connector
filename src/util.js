@@ -4,9 +4,18 @@
 // containment check.
 
 import path from "node:path";
+import os from "node:os";
 import { realpath, stat } from "node:fs/promises";
 
 export const todayISO = () => new Date().toISOString().slice(0, 10);
+
+// A timeout response can arrive after a server or proxy accepted the request,
+// just like a 5xx can arrive after the upstream applied it. Callers that have
+// an exact replay mechanism must keep both outcomes unresolved.
+export function isAmbiguousHttpStatus(status) {
+  const value = Number(status);
+  return value === 408 || value >= 500;
+}
 
 // Escape a string value for interpolation into a QBO query string literal.
 // Backslashes first, then quotes. Otherwise a value ending in a backslash
@@ -32,6 +41,66 @@ export function guessContentType(name) {
     docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   };
   return map[ext] || "application/octet-stream";
+}
+
+// Consume a Fetch Response body without first materializing an unbounded
+// ArrayBuffer. The configured limit is validated at the edge, Content-Length
+// can reject a known-oversized response before reading, and the running total
+// protects responses that omit or lie about their length.
+export async function readResponseBuffer(response, {
+  maxBytes,
+  label = "Response",
+  capName = "maxBytes",
+} = {}) {
+  const cap = typeof maxBytes === "number" ? maxBytes : Number(String(maxBytes ?? "").trim());
+  if (!Number.isSafeInteger(cap) || cap <= 0) {
+    throw new Error(`${capName} must be a positive safe integer number of bytes; received ${JSON.stringify(maxBytes)}.`);
+  }
+
+  const declaredHeader = response?.headers?.get?.("content-length");
+  const declaredText = declaredHeader == null ? "" : String(declaredHeader).trim();
+  if (/^\d+$/.test(declaredText) && BigInt(declaredText) > BigInt(cap)) {
+    const error = new Error(`${label} declares ${declaredText} bytes, above the ${cap}-byte cap (${capName}).`);
+    // Cancel the untouched body so the transport does not continue buffering
+    // a response we already know cannot be accepted.
+    await response.body?.cancel?.(error).catch(() => {});
+    throw error;
+  }
+
+  if (!response?.body) return Buffer.alloc(0);
+  if (typeof response.body.getReader !== "function") {
+    throw new Error(`${label} body is not a Web ReadableStream.`);
+  }
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const length = value?.byteLength;
+      if (!Number.isSafeInteger(length) || length < 0) {
+        throw new Error(`${label} stream returned a chunk without a valid byteLength.`);
+      }
+      if (length > cap - total) {
+        const observed = total + length;
+        const error = new Error(
+          `${label} exceeded the ${cap}-byte cap while downloading ` +
+          `(received at least ${observed} bytes; ${capName}).`
+        );
+        await reader.cancel(error).catch(() => {});
+        throw error;
+      }
+      // Copy only after the cap check. In particular, an oversized chunk never
+      // causes a second oversized allocation inside this helper.
+      chunks.push(Buffer.from(value));
+      total += length;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, total);
 }
 
 // Normalize a human-entered name for tolerant comparison: casefold, collapse
@@ -74,12 +143,77 @@ export function isRealCalendarDate(s) {
 // the payment-void form ?operation=update&include=void. The trailing boundary
 // keeps "operation=deleted" (not a thing, but cheap to exclude) from matching.
 export function isDestructiveOperation(pathAndQuery) {
-  return /[?&](operation=(delete|void)|include=void)\b/i.test(String(pathAndQuery ?? ""));
+  const raw = String(pathAndQuery ?? "");
+  const query = raw.includes("?") ? raw.slice(raw.indexOf("?") + 1) : "";
+  try {
+    const params = new URLSearchParams(query);
+    for (const [name, value] of params) {
+      const key = name.toLowerCase();
+      const normalized = value.toLowerCase();
+      if (key === "operation" && (normalized === "delete" || normalized === "void")) return true;
+      if (key === "include" && normalized === "void") return true;
+    }
+    return false;
+  } catch {
+    // Validation rejects malformed encodings before the request is sent. Treat
+    // an unparseable query as potentially destructive in this predicate too.
+    return true;
+  }
 }
 
-// Expand a leading ~ to the user's home directory.
+// Validate a caller-supplied path for the raw API escape hatches. The client
+// appends its own minorversion and, for writes, requestid; allowing either in
+// the caller's query (or allowing a fragment to hide the appended suffix)
+// breaks the durable idempotency binding.
+export function validateRawQboPath(value) {
+  const raw = String(value ?? "");
+  const normalized = raw.startsWith("/") ? raw : `/${raw}`;
+  if (!raw.trim()) throw new Error("`path` cannot be empty.");
+  if (normalized.startsWith("//")) throw new Error("`path` must be relative to the selected QuickBooks company, not a network URL.");
+  if (/[\r\n\t\0]/.test(normalized)) throw new Error("Control characters are not allowed in `path`.");
+  if (normalized.includes("#")) {
+    throw new Error("URL fragments are not allowed in `path`; they would hide the connector-managed request parameters.");
+  }
+
+  const question = normalized.indexOf("?");
+  const rawPathname = question === -1 ? normalized : normalized.slice(0, question);
+  let decodedPathname;
+  try {
+    decodedPathname = decodeURIComponent(rawPathname);
+  } catch {
+    throw new Error("Invalid percent-encoding in `path`.");
+  }
+  if (/[\r\n\t\0#]/.test(decodedPathname)) throw new Error("Encoded control characters or fragments are not allowed in `path`.");
+  if (decodedPathname.includes("..") || decodedPathname.includes("\\")) {
+    throw new Error("Path traversal sequences are not allowed in `path`; it must stay under /v3/company/{realmId}.");
+  }
+
+  if (question !== -1) {
+    let params;
+    try {
+      params = new URLSearchParams(normalized.slice(question + 1));
+    } catch {
+      throw new Error("Invalid query encoding in `path`.");
+    }
+    for (const [name] of params) {
+      const key = name.toLowerCase();
+      if (key === "requestid" || key === "minorversion") {
+        throw new Error(`Query parameter "${name}" is reserved; the connector manages requestid and minorversion.`);
+      }
+    }
+  }
+  return normalized;
+}
+
+// Expand a leading ~ to the user's home directory. Accept both separator
+// styles because .env examples are commonly copied between macOS/Linux and
+// Windows; path.join then emits the separator native to the current host.
 export function expandHome(p) {
-  return String(p).replace(/^~(?=$|\/)/, process.env.HOME || "~");
+  const input = String(p);
+  if (input === "~") return os.homedir();
+  if (!/^~[\\/]/.test(input)) return input;
+  const parts = input.slice(2).split(/[\\/]+/).filter(Boolean);
+  return path.join(os.homedir(), ...parts);
 }
 
 // Names that user-supplied file paths may never touch, read or write: key

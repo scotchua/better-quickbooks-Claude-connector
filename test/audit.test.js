@@ -2,7 +2,21 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mkdtemp, readFile, writeFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { summarizeResponse, auditFilePath, record, auditEnabled, findWriteByRequestId } from "../src/audit.js";
+import {
+  summarizeResponse,
+  auditFilePath,
+  writeRecoveryFilePath,
+  record,
+  auditEnabled,
+  recordWriteIntent,
+  recordWriteOutcome,
+  findWriteIntentByRequestId,
+  verifyWriteReplay,
+  findWriteByRequestId,
+  listUnresolvedWrites,
+  claimRecoveryRequestId,
+  toolContext,
+} from "../src/audit.js";
 
 describe("summarizeResponse", () => {
   it("extracts the affected entity, id, doc number, and total", () => {
@@ -123,6 +137,157 @@ describe("audit modes", () => {
 
     process.env.QBO_AUDIT = "strict";
     await expect(record({ kind: "api_write" })).rejects.toThrow(/ALREADY BEEN SENT/);
+  });
+});
+
+describe("durable write recovery ledger", () => {
+  const origDir = process.env.QBO_AUDIT_DIR;
+  const origMode = process.env.QBO_AUDIT;
+  afterEach(() => {
+    if (origDir === undefined) delete process.env.QBO_AUDIT_DIR; else process.env.QBO_AUDIT_DIR = origDir;
+    if (origMode === undefined) delete process.env.QBO_AUDIT; else process.env.QBO_AUDIT = origMode;
+  });
+
+  const envelope = {
+    request_id: "recover-1",
+    company: "acme",
+    realmId: "123456789",
+    environment: "sandbox",
+    method: "POST",
+    path: "/invoice?minorversion=75&requestid=recover-1",
+    body_sha256: "a".repeat(64),
+  };
+
+  async function useTempLedger() {
+    const dir = await mkdtemp(path.join(tmpdir(), "qbo-recovery-"));
+    process.env.QBO_AUDIT_DIR = dir;
+    return dir;
+  }
+
+  it("persists intent and outcome in order even when the optional audit is off", async () => {
+    await useTempLedger();
+    process.env.QBO_AUDIT = "off";
+
+    await recordWriteIntent(envelope);
+    await recordWriteOutcome({ ...envelope, outcome: "response", status: 200, ok: true });
+
+    const lines = (await readFile(writeRecoveryFilePath(), "utf8")).trim().split("\n").map(JSON.parse);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatchObject({ ...envelope, kind: "api_write_intent" });
+    expect(lines[1]).toMatchObject({ ...envelope, kind: "api_write_outcome", outcome: "response", status: 200 });
+    expect(lines[0].ts).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it("durably creates a nested recovery-ledger directory chain", async () => {
+    const base = await mkdtemp(path.join(tmpdir(), "qbo-recovery-nested-"));
+    process.env.QBO_AUDIT_DIR = path.join(base, "new", "nested");
+
+    await recordWriteIntent(envelope);
+
+    const line = JSON.parse((await readFile(writeRecoveryFilePath(), "utf8")).trim());
+    expect(line).toMatchObject({ ...envelope, kind: "api_write_intent" });
+  });
+
+  it("finds and verifies the complete request envelope", async () => {
+    await useTempLedger();
+    await recordWriteIntent(envelope);
+    await expect(findWriteIntentByRequestId(envelope.request_id)).resolves.toMatchObject(envelope);
+    await expect(verifyWriteReplay(envelope.request_id, envelope)).resolves.toMatchObject(envelope);
+  });
+
+  it("refuses to replay a request id after a definitive durable outcome", async () => {
+    await useTempLedger();
+    await recordWriteIntent(envelope);
+    await recordWriteOutcome({ ...envelope, outcome: "response", status: 200, ok: true });
+    await expect(verifyWriteReplay(envelope.request_id, envelope))
+      .rejects.toThrow(/definitive durable outcome.*replaying a resolved id is refused/is);
+  });
+
+  it("refuses an old unresolved id when Intuit's dedupe retention is unknown", async () => {
+    await useTempLedger();
+    await recordWriteIntent(envelope);
+    const original = await findWriteIntentByRequestId(envelope.request_id);
+    await recordWriteOutcome({ ...envelope, outcome: "transport_error", error: "reset" });
+    const intentAt = Date.parse(original.ts);
+    await expect(verifyWriteReplay(envelope.request_id, envelope, {
+      now: intentAt + 90_001,
+      maxAgeMs: 90_000,
+    })).rejects.toThrow(/beyond the 90000ms recovery replay window.*no request-id retention guarantee/is);
+    await expect(verifyWriteReplay(envelope.request_id, envelope, {
+      now: intentAt + 90_000,
+      maxAgeMs: 90_000,
+    })).resolves.toMatchObject(envelope);
+  });
+
+  it.each([
+    ["company", "beta"],
+    ["realmId", "987654321"],
+    ["environment", "production"],
+    ["method", "PUT"],
+    ["path", "/bill?minorversion=75&requestid=recover-1"],
+    ["body_sha256", "b".repeat(64)],
+  ])("refuses a replay when %s differs", async (field, changed) => {
+    await useTempLedger();
+    await recordWriteIntent(envelope);
+    await expect(verifyWriteReplay(envelope.request_id, { ...envelope, [field]: changed }))
+      .rejects.toThrow(new RegExp(field));
+  });
+
+  it("refuses an override with no durable intent", async () => {
+    await useTempLedger();
+    await expect(verifyWriteReplay("unknown-id", { ...envelope, request_id: "unknown-id" }))
+      .rejects.toThrow(/no durable write intent/);
+  });
+
+  it("fails closed when the ledger is corrupt", async () => {
+    await useTempLedger();
+    await writeFile(writeRecoveryFilePath(), `${JSON.stringify({ ...envelope, kind: "api_write_intent" })}\n{"broken":\n`);
+    await expect(verifyWriteReplay(envelope.request_id, envelope)).rejects.toThrow(/corrupt/);
+  });
+
+  it("fails closed when duplicate intents conflict", async () => {
+    await useTempLedger();
+    await recordWriteIntent(envelope);
+    await recordWriteIntent({ ...envelope, path: "/bill?minorversion=75&requestid=recover-1" });
+    await expect(findWriteIntentByRequestId(envelope.request_id)).rejects.toThrow(/conflict.*path/);
+  });
+
+  it("lists only the request ids whose latest durable outcome is ambiguous", async () => {
+    await useTempLedger();
+    await recordWriteIntent({ ...envelope, request_id: "transport", tool: "create_invoice" });
+    await recordWriteOutcome({ ...envelope, request_id: "transport", outcome: "transport_error", error: "reset" });
+    await recordWriteIntent({ ...envelope, request_id: "server-error", company: "beta" });
+    await recordWriteOutcome({ ...envelope, request_id: "server-error", company: "beta", outcome: "response", status: 503, ok: false });
+    await recordWriteIntent({ ...envelope, request_id: "request-timeout" });
+    await recordWriteOutcome({ ...envelope, request_id: "request-timeout", outcome: "response", status: 408, ok: false });
+    await recordWriteIntent({ ...envelope, request_id: "rejected" });
+    await recordWriteOutcome({ ...envelope, request_id: "rejected", outcome: "response", status: 400, ok: false });
+    await recordWriteIntent({ ...envelope, request_id: "succeeded" });
+    await recordWriteOutcome({ ...envelope, request_id: "succeeded", outcome: "response", status: 200, ok: true });
+
+    const rows = await listUnresolvedWrites();
+    expect(rows.map((row) => row.request_id).sort()).toEqual(["request-timeout", "server-error", "transport"]);
+    expect(rows.find((row) => row.request_id === "transport")).toMatchObject({
+      tool: "create_invoice", body_sha256: envelope.body_sha256, outcome: "transport_error", error: "reset",
+      replay_eligible: true, replay_age_ms: expect.any(Number), replay_deadline: expect.any(String),
+    });
+    expect(await listUnresolvedWrites({ company: "acme" })).toHaveLength(2);
+  });
+
+  it("marks an ambiguous request resolved after a successful identical replay", async () => {
+    await useTempLedger();
+    await recordWriteIntent(envelope);
+    await recordWriteOutcome({ ...envelope, outcome: "transport_error" });
+    await recordWriteIntent({ ...envelope, replay: true });
+    await recordWriteOutcome({ ...envelope, outcome: "response", status: 200, ok: true });
+    await expect(listUnresolvedWrites()).resolves.toEqual([]);
+  });
+
+  it("allows one underlying write to claim a high-level recovery id", async () => {
+    await toolContext.run({ tool: "create_bill", recoveryRequestId: "recover-once", recoveryClaimed: false }, async () => {
+      expect(claimRecoveryRequestId()).toBe("recover-once");
+      expect(() => claimRecoveryRequestId()).toThrow(/already recovered the first QuickBooks write/);
+    });
   });
 });
 

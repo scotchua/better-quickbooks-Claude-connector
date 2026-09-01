@@ -64,6 +64,11 @@ export function toNumber(v) {
 // no common chart of accounts. The output field is named combined_total rather
 // than total so nothing downstream reads it as a consolidated figure.
 export function consolidateReports(byCompany) {
+  const companies = byCompany.map((b) => b.company);
+  const duplicate = companies.find((company, i) => companies.indexOf(company) !== i);
+  if (duplicate) {
+    throw new Error(`Company "${duplicate}" appears more than once; refusing to double-count the same report.`);
+  }
   const keyOf = (r, name) => `${r.section}|${name}|${r.is_summary ? "S" : "R"}`;
   const order = [];
   const map = new Map();
@@ -80,7 +85,6 @@ export function consolidateReports(byCompany) {
       if (amount != null) map.get(k).amounts[company] = amount;
     }
   }
-  const companies = byCompany.map((b) => b.company);
   const rows = order.map((k) => {
     const row = map.get(k);
     const total = companies.reduce((s, c) => s + (row.amounts[c] ?? 0), 0);
@@ -173,7 +177,7 @@ export function serializeReportInline(report, maxChars) {
   const name = report?.Header?.ReportName || "This report";
   throw new Error(
     `${name} came back at ${text.length.toLocaleString()} characters, above the ${Number(maxChars).toLocaleString()} inline limit. ` +
-    `Pass save_path to write it to a file and get a receipt, or narrow it: on a balance detail report a customer or vendor filter ` +
+    `Use export_qbo_artifact to write it to a fenced, no-clobber file, or narrow it: on a balance detail report a customer or vendor filter ` +
     `cuts the size far more than any date does. Raise QBO_REPORT_MAX_INLINE_CHARS to allow it inline.`
   );
 }

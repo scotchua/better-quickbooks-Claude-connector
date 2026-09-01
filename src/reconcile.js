@@ -102,34 +102,122 @@ export function bankTieOut({ statementEndingBalance, glEndingBalance, outflows, 
 }
 
 // Match statement rows against register rows on amount (exact to the cent)
-// and date (within toleranceDays), greedily preferring the closest date.
-// Each register row is consumed at most once.
+// and date (within toleranceDays). Each equal-amount group is solved as an
+// ordered bipartite assignment: maximize the number of matches first, then
+// minimize total date distance. The earlier greedy matcher could consume the
+// only viable row for a later transaction and report a false exception.
 // Rows: { date: "YYYY-MM-DD", amount: number > 0, ... }
 export function matchTransactions(statementRows, registerRows, { toleranceDays = 2 } = {}) {
-  const used = new Set();
-  const matched = [];
-  const statement_only = [];
-  for (const s of statementRows) {
-    let best = null;
-    let bestDiff = Infinity;
-    for (let i = 0; i < registerRows.length; i++) {
-      if (used.has(i)) continue;
-      const q = registerRows[i];
-      if (Math.abs((q.amount ?? 0) - (s.amount ?? 0)) > 0.005) continue;
-      const diff = Math.abs(toMs(q.date) - toMs(s.date));
-      if (diff <= toleranceDays * DAY_MS && diff < bestDiff) {
-        best = i;
-        bestDiff = diff;
+  const amountKey = (row) => Math.round((Number(row.amount) || 0) * 100);
+  const statementsByAmount = new Map();
+  const registersByAmount = new Map();
+  statementRows.forEach((row, index) => {
+    const key = amountKey(row);
+    if (!statementsByAmount.has(key)) statementsByAmount.set(key, []);
+    statementsByAmount.get(key).push({ row, index, ms: toMs(row.date) });
+  });
+  registerRows.forEach((row, index) => {
+    const key = amountKey(row);
+    if (!registersByAmount.has(key)) registersByAmount.set(key, []);
+    registersByAmount.get(key).push({ row, index, ms: toMs(row.date) });
+  });
+
+  const matchedByStatement = new Map();
+  const usedRegisters = new Set();
+  const maxDiff = toleranceDays * DAY_MS;
+
+  for (const [amount, rawStatements] of statementsByAmount) {
+    const rawRegisters = registersByAmount.get(amount) || [];
+    if (!rawRegisters.length) continue;
+    const statements = [...rawStatements].sort((a, b) => a.ms - b.ms || a.index - b.index);
+    const registers = [...rawRegisters].sort((a, b) => a.ms - b.ms || a.index - b.index);
+    const n = statements.length;
+    const m = registers.length;
+    const width = m + 1;
+    const directions = new Uint8Array((n + 1) * width); // 1=up, 2=left, 3=match
+    let prevCount = new Int32Array(width);
+    let prevCost = new Float64Array(width);
+
+    const better = (countA, costA, countB, costB) =>
+      countA > countB || (countA === countB && costA < costB);
+
+    for (let i = 1; i <= n; i++) {
+      const count = new Int32Array(width);
+      const cost = new Float64Array(width);
+      directions[i * width] = 1;
+      for (let j = 1; j <= m; j++) {
+        // Skip the current statement row.
+        let bestCount = prevCount[j];
+        let bestCost = prevCost[j];
+        let direction = 1;
+        // Or skip the current register row.
+        if (better(count[j - 1], cost[j - 1], bestCount, bestCost)) {
+          bestCount = count[j - 1];
+          bestCost = cost[j - 1];
+          direction = 2;
+        }
+        const diff = Math.abs(statements[i - 1].ms - registers[j - 1].ms);
+        const amountDiff = Math.abs((Number(statements[i - 1].row.amount) || 0) - (Number(registers[j - 1].row.amount) || 0));
+        if (amountDiff <= 0.005 && Number.isFinite(diff) && diff <= maxDiff) {
+          const matchCount = prevCount[j - 1] + 1;
+          const matchCost = prevCost[j - 1] + diff;
+          // Prefer a match on an exact tie for deterministic, intuitive output.
+          if (better(matchCount, matchCost, bestCount, bestCost) ||
+              (matchCount === bestCount && matchCost === bestCost)) {
+            bestCount = matchCount;
+            bestCost = matchCost;
+            direction = 3;
+          }
+        }
+        count[j] = bestCount;
+        cost[j] = bestCost;
+        directions[i * width + j] = direction;
+      }
+      prevCount = count;
+      prevCost = cost;
+    }
+
+    let i = n;
+    let j = m;
+    while (i > 0 && j > 0) {
+      const direction = directions[i * width + j];
+      if (direction === 3) {
+        const s = statements[i - 1];
+        const q = registers[j - 1];
+        const diff = Math.abs(s.ms - q.ms);
+        const statementCandidates = registers.filter((candidate) =>
+          Math.abs((Number(s.row.amount) || 0) - (Number(candidate.row.amount) || 0)) <= 0.005 &&
+          Math.abs(s.ms - candidate.ms) <= maxDiff
+        ).length;
+        const registerCandidates = statements.filter((candidate) =>
+          Math.abs((Number(candidate.row.amount) || 0) - (Number(q.row.amount) || 0)) <= 0.005 &&
+          Math.abs(candidate.ms - q.ms) <= maxDiff
+        ).length;
+        matchedByStatement.set(s.index, {
+          statement: s.row,
+          register: q.row,
+          date_diff_days: Math.round(diff / DAY_MS),
+          ambiguous: statementCandidates > 1 || registerCandidates > 1,
+        });
+        usedRegisters.add(q.index);
+        i--;
+        j--;
+      } else if (direction === 2) {
+        j--;
+      } else {
+        i--;
       }
     }
-    if (best != null) {
-      used.add(best);
-      matched.push({ statement: s, register: registerRows[best], date_diff_days: Math.round(bestDiff / DAY_MS) });
-    } else {
-      statement_only.push(s);
-    }
   }
-  const register_only = registerRows.filter((_, i) => !used.has(i));
+
+  const matched = [];
+  const statement_only = [];
+  statementRows.forEach((row, index) => {
+    const match = matchedByStatement.get(index);
+    if (match) matched.push(match);
+    else statement_only.push(row);
+  });
+  const register_only = registerRows.filter((_, i) => !usedRegisters.has(i));
   return { matched, statement_only, register_only };
 }
 

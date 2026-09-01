@@ -8,9 +8,12 @@
 // listing tools never calls Intuit.
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn } from "node:child_process";
-import { writeFile, rm } from "node:fs/promises";
+import { writeFile, rename, rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { KNOWN_TOOL_NAMES } from "../src/tool-profiles.js";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -21,6 +24,7 @@ function startServer(env = {}) {
     env: { ...process.env, ...env },
     stdio: ["pipe", "pipe", "pipe"],
   });
+  const closed = new Promise((resolve) => child.once("close", resolve));
   const pending = new Map();
   let buffer = "";
   child.stdout.on("data", (chunk) => {
@@ -32,8 +36,12 @@ function startServer(env = {}) {
       if (!line) continue;
       let msg;
       try { msg = JSON.parse(line); } catch { continue; }
-      const resolve = pending.get(msg.id);
-      if (resolve) { pending.delete(msg.id); resolve(msg); }
+      const request = pending.get(msg.id);
+      if (request) {
+        pending.delete(msg.id);
+        clearTimeout(request.timer);
+        request.resolve(msg);
+      }
     }
   });
 
@@ -41,12 +49,19 @@ function startServer(env = {}) {
   const call = (method, params) =>
     new Promise((resolve, reject) => {
       const id = nextId++;
-      pending.set(id, resolve);
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error(`timed out waiting for ${method}`));
+      }, 10_000);
+      pending.set(id, { resolve, timer });
       child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
-      setTimeout(() => reject(new Error(`timed out waiting for ${method}`)), 10_000);
     });
 
-  return { child, call, stop: () => child.kill() };
+  const stop = async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    await closed;
+  };
+  return { child, call, stop };
 }
 
 async function listTools(env = {}) {
@@ -60,7 +75,7 @@ async function listTools(env = {}) {
     const res = await server.call("tools/list", {});
     return res.result.tools;
   } finally {
-    server.stop();
+    await server.stop();
   }
 }
 
@@ -81,12 +96,12 @@ async function callTool(server, name, args = {}) {
 
 describe("MCP server contract", () => {
   let tools;
-  beforeAll(async () => { tools = await listTools(); }, 20_000);
+  beforeAll(async () => { tools = await listTools({ QBO_TOOL_PROFILE: "full" }); }, 20_000);
 
   const byName = (n) => tools.find((t) => t.name === n);
 
   it("registers the full tool surface", () => {
-    expect(tools.length).toBe(115);
+    expect(tools.map((tool) => tool.name).sort()).toEqual([...KNOWN_TOOL_NAMES].sort());
   });
 
   // Traversal reads the graph and changes nothing, so a host should be able to
@@ -96,12 +111,16 @@ describe("MCP server contract", () => {
   });
 
   // The detail variants ride on the existing tools rather than adding four
-  // more; if the flag stops being registered they silently become unreachable.
-  it("offers detail and save_path on the balance and valuation reports", () => {
+  // more; the old save_path remains only as a migration sentinel that errors.
+  it("offers detail and an explicit export migration on balance and valuation reports", () => {
     for (const n of ["get_customer_balance", "get_vendor_balance", "get_inventory_valuation"]) {
       const props = byName(n).inputSchema.properties;
       expect(Object.keys(props), n).toEqual(expect.arrayContaining(["detail", "save_path"]));
+      expect(props.save_path.description, n).toMatch(/deprecated.*export_qbo_artifact/i);
     }
+    expect(byName("export_qbo_artifact").inputSchema.required).toEqual(
+      expect.arrayContaining(["artifact", "save_path"])
+    );
   });
 
   // A detail report can exceed 900KB with no way to bound it by date, so the
@@ -114,8 +133,8 @@ describe("MCP server contract", () => {
     }
   });
 
-  it("gives every tool a description and an input schema", () => {
-    const missing = tools.filter((t) => !t.description || !t.inputSchema);
+  it("gives every tool a title, description, and input schema", () => {
+    const missing = tools.filter((t) => !t.title || !t.description || !t.inputSchema);
     expect(missing.map((t) => t.name)).toEqual([]);
   });
 
@@ -127,14 +146,18 @@ describe("MCP server contract", () => {
 
   it("marks reads read-only and writes not", () => {
     expect(byName("get_balance_sheet").annotations.readOnlyHint).toBe(true);
+    expect(byName("get_invoice_pdf").annotations.readOnlyHint).toBe(true);
     expect(byName("api_get").annotations.readOnlyHint).toBe(true);
     expect(byName("create_invoice").annotations.readOnlyHint).toBe(false);
     expect(byName("api_request").annotations.readOnlyHint).toBe(false);
   });
 
-  it("marks only deletes and voids destructive", () => {
+  it("marks named corrections and raw/batch escape hatches destructive", () => {
     expect(byName("delete_transaction").annotations.destructiveHint).toBe(true);
     expect(byName("void_invoice").annotations.destructiveHint).toBe(true);
+    expect(byName("api_request").annotations.destructiveHint).toBe(true);
+    expect(byName("execute_batch").annotations.destructiveHint).toBe(true);
+    expect(byName("download_attachment").annotations.destructiveHint).toBe(true);
     expect(byName("create_invoice").annotations.destructiveHint).toBe(false);
     expect(byName("get_profit_and_loss").annotations.destructiveHint).toBe(false);
   });
@@ -142,16 +165,137 @@ describe("MCP server contract", () => {
   // These change state on this machine rather than in QuickBooks, so the
   // write-verb prefixes miss them; calling them read-only would be a lie.
   it("does not call local state mutators read-only", () => {
-    for (const n of ["select_company", "set_company_policy", "register_client", "connect_company"]) {
+    for (const n of ["select_company", "set_company_policy", "register_client", "connect_company", "preview_bank_csv_import"]) {
       expect(byName(n).annotations.readOnlyHint, n).toBe(false);
     }
   });
+
+  it("does not call local file writers read-only", () => {
+    for (const n of ["export_qbo_artifact", "download_attachment"]) {
+      expect(byName(n).annotations.readOnlyHint, n).toBe(false);
+    }
+  });
+
+  it("makes company required in every ordinary write schema by default", () => {
+    for (const n of ["create_invoice", "update_bill", "void_payment", "attach_file", "api_request"]) {
+      expect(byName(n).inputSchema.required, n).toContain("company");
+    }
+    expect(byName("get_company_info").inputSchema.required || []).not.toContain("company");
+  });
+
+  it("offers exact replay only when one tool call maps to one QBO request", () => {
+    for (const n of ["create_invoice", "create_bill", "update_bill", "void_payment", "attach_file", "execute_batch", "api_request"]) {
+      expect(byName(n).inputSchema.properties.request_id, n).toBeTruthy();
+    }
+    for (const n of ["import_transactions_from_csv", "create_journal_entry_multi"]) {
+      expect(byName(n).inputSchema.properties.request_id, n).toBeUndefined();
+    }
+    expect(byName("get_balance_sheet").inputSchema.properties.request_id).toBeUndefined();
+    expect(byName("create_invoice").inputSchema.properties.request_id.maxLength).toBe(50);
+    expect(byName("api_request").inputSchema.properties.request_id.maxLength).toBe(50);
+    expect(byName("execute_batch").inputSchema.properties.request_id.maxLength).toBe(36);
+  });
+
+  it("keeps former composite convenience flags as safe migration sentinels", () => {
+    expect(byName("create_invoice").inputSchema.properties.send_email).toMatchObject({ const: false });
+    expect(byName("create_bill").inputSchema.properties.create_vendor_if_missing).toMatchObject({ const: false });
+  });
+
+  it("rejects legacy report save_path before fetching instead of silently ignoring it", async () => {
+    const server = startServer({ QBO_TOOL_PROFILE: "full" });
+    try {
+      await initialize(server);
+      const result = await callTool(server, "get_balance_sheet", {
+        end_date: "2026-07-31",
+        save_path: path.join(tmpdir(), "old-caller-report.json"),
+      });
+      expect(result.isError).toBe(true);
+      expect(result.body.error).toMatch(/did not write a file.*export_qbo_artifact/is);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("splits CSV preview from posting so preview keeps read-style company resolution", () => {
+    const preview = byName("preview_bank_csv_import");
+    const importer = byName("import_transactions_from_csv");
+    expect(preview.inputSchema.required || []).not.toContain("company");
+    expect(preview.inputSchema.properties).not.toHaveProperty("dry_run");
+    expect(preview.inputSchema.properties).not.toHaveProperty("request_id");
+    expect(importer.inputSchema.required).toContain("company");
+    expect(importer.inputSchema.properties).not.toHaveProperty("dry_run");
+    expect(importer.inputSchema.properties).not.toHaveProperty("request_id");
+  });
+
+  it("keeps purely local context tools closed-world", () => {
+    for (const n of ["list_companies", "get_active_company", "list_clients", "resolve_client", "get_company_policy", "list_unresolved_writes"]) {
+      expect(byName(n).annotations.openWorldHint, n).toBe(false);
+    }
+  });
+
+  it("returns server usage instructions during initialization", async () => {
+    const server = startServer({ QBO_TOOL_PROFILE: "full" });
+    try {
+      const res = await server.call("initialize", {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "contract-test", version: "1" },
+      });
+      expect(res.result.instructions).toMatch(/pass that company explicitly on every write/i);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("publishes output schemas for high-traffic tools", () => {
+    for (const n of ["list_companies", "health_check", "resolve_client", "get_preferences", "get_transaction_links", "list_unresolved_writes"]) {
+      expect(byName(n).outputSchema, n).toBeTruthy();
+    }
+  });
+
+  it("returns MCP structuredContent while preserving the text fallback", async () => {
+    const server = startServer({ QBO_TOOL_PROFILE: "full" });
+    try {
+      await initialize(server);
+      const result = await callTool(server, "list_companies");
+      expect(result.structuredContent).toMatchObject({ count: expect.any(Number), companies: expect.any(Array) });
+      expect(result.body).toEqual(result.structuredContent);
+    } finally {
+      await server.stop();
+    }
+  }, 20_000);
+
+  it("does not duplicate untyped payloads in structuredContent", async () => {
+    const server = startServer({ QBO_TOOL_PROFILE: "full" });
+    try {
+      await initialize(server);
+      const result = await callTool(server, "get_company_policy", {});
+      expect(result.body).toMatchObject({ companies: expect.any(Array) });
+      expect(result.structuredContent).toBeUndefined();
+    } finally {
+      await server.stop();
+    }
+  }, 20_000);
+
+  it("returns honest untyped errors without claiming every failure is non-retryable", async () => {
+    const server = startServer({ QBO_TOOL_PROFILE: "full" });
+    try {
+      await initialize(server);
+      const result = await callTool(server, "get_preferences", { company: "definitely-not-connected-zzzz" });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toBeUndefined();
+      expect(result.body).toMatchObject({ error: expect.stringMatching(/No such company/) });
+      expect(result.body).not.toHaveProperty("retryable");
+    } finally {
+      await server.stop();
+    }
+  }, 20_000);
 
   it("reports the version from package.json, not a hardcoded string", async () => {
     const { version } = JSON.parse(
       await import("node:fs/promises").then((fs) => fs.readFile(path.join(ROOT, "package.json"), "utf8"))
     );
-    const server = startServer();
+    const server = startServer({ QBO_TOOL_PROFILE: "full" });
     try {
       const res = await server.call("initialize", {
         protocolVersion: "2024-11-05",
@@ -160,7 +304,79 @@ describe("MCP server contract", () => {
       });
       expect(res.result.serverInfo.version).toBe(version);
     } finally {
-      server.stop();
+      await server.stop();
+    }
+  }, 20_000);
+});
+
+describe("MCP resources and prompts", () => {
+  it("lists static and parameterized company context resources", async () => {
+    const server = startServer({ QBO_TOOL_PROFILE: "full" });
+    try {
+      await initialize(server);
+      const resources = await server.call("resources/list", {});
+      expect(resources.result.resources.map((r) => r.uri)).toContain("qbo://companies");
+      const templates = await server.call("resources/templates/list", {});
+      expect(templates.result.resourceTemplates.map((r) => r.uriTemplate)).toContain("qbo://company/{slug}/context");
+    } finally {
+      await server.stop();
+    }
+  }, 20_000);
+
+  it("offers portable accounting workflow prompts", async () => {
+    const server = startServer({ QBO_TOOL_PROFILE: "full" });
+    try {
+      await initialize(server);
+      const listed = await server.call("prompts/list", {});
+      const names = listed.result.prompts.map((p) => p.name);
+      for (const name of ["close-readiness-review", "business-health-brief", "collections-review", "transaction-explanation", "reconciliation-review"]) {
+        expect(names, name).toContain(name);
+      }
+      const prompt = await server.call("prompts/get", {
+        name: "close-readiness-review",
+        arguments: { client: "acme", month: "2026-07", accounting_basis: "Accrual", materiality: "$1,000" },
+      });
+      expect(prompt.result.messages[0].content.text).toMatch(/Do not infer a tie-out that was not tested/);
+    } finally {
+      await server.stop();
+    }
+  }, 20_000);
+
+  it("rejects malformed YYYY-MM prompt arguments", async () => {
+    const server = startServer({ QBO_TOOL_PROFILE: "full" });
+    try {
+      await initialize(server);
+      for (const [name, args] of [
+        ["month-end-data-pack", { client: "acme", month: "2026-13" }],
+        ["close-readiness-review", {
+          client: "acme",
+          month: "July 2026",
+          accounting_basis: "Accrual",
+          materiality: "$1,000",
+        }],
+      ]) {
+        const response = await server.call("prompts/get", { name, arguments: args });
+        expect(response.error, name).toBeTruthy();
+        expect(JSON.stringify(response.error), name).toMatch(/month|invalid|format/i);
+        expect(response.result, name).toBeUndefined();
+      }
+    } finally {
+      await server.stop();
+    }
+  }, 20_000);
+
+  it("advertises prompts only when the active profile exposes their required tools", async () => {
+    const owner = startServer({ QBO_TOOL_PROFILE: "owner" });
+    const admin = startServer({ QBO_TOOL_PROFILE: "admin" });
+    try {
+      await initialize(owner);
+      await initialize(admin);
+      const ownerNames = (await owner.call("prompts/list", {})).result.prompts.map((p) => p.name);
+      expect(ownerNames).toEqual(["business-health-brief"]);
+      const adminResult = await admin.call("prompts/list", {});
+      expect(adminResult.result?.prompts ?? []).toEqual([]);
+    } finally {
+      await Promise.all([owner.stop(), admin.stop()]);
     }
   }, 20_000);
 });
@@ -170,7 +386,7 @@ describe("MCP server contract", () => {
 // prove they took effect.
 describe("MCP server kill switches", () => {
   it("hides every write tool under QBO_DISABLE_WRITES", async () => {
-    const names = (await listTools({ QBO_DISABLE_WRITES: "true" })).map((t) => t.name);
+    const names = (await listTools({ QBO_TOOL_PROFILE: "full", QBO_DISABLE_WRITES: "true" })).map((t) => t.name);
     for (const n of ["create_invoice", "delete_transaction", "api_request", "execute_batch", "attach_file"]) {
       expect(names, n).not.toContain(n);
     }
@@ -182,7 +398,7 @@ describe("MCP server kill switches", () => {
   }, 20_000);
 
   it("hides only deletes and voids under QBO_DISABLE_DELETES", async () => {
-    const names = (await listTools({ QBO_DISABLE_DELETES: "true" })).map((t) => t.name);
+    const names = (await listTools({ QBO_TOOL_PROFILE: "full", QBO_DISABLE_DELETES: "true" })).map((t) => t.name);
     for (const n of ["delete_transaction", "void_invoice", "void_payment", "void_sales_receipt"]) {
       expect(names, n).not.toContain(n);
     }
@@ -192,30 +408,63 @@ describe("MCP server kill switches", () => {
   }, 20_000);
 });
 
-describe("company response provenance", () => {
-  const fixtures = [
-    ["provenance-a", "1000000000000001"],
-    ["provenance-b", "1000000000000002"],
-  ];
-
-  beforeAll(async () => {
-    const future = Date.now() + 3_600_000;
-    for (const [slug, realmId] of fixtures) {
-      await writeFile(path.join(ROOT, `tokens.${slug}.json`), JSON.stringify({
-        access_token: "test-access-token",
-        refresh_token: "test-refresh-token",
-        expires_at: future,
-        realmId,
-        environment: "sandbox",
-      }));
+describe("MCP startup tool profiles", () => {
+  it("uses a bounded task-sized core profile by default", async () => {
+    const tools = await listTools();
+    const names = tools.map((t) => t.name);
+    expect(names).toContain("create_journal_entry");
+    expect(names).toContain("get_consolidated_balance_sheet");
+    expect(names).toContain("create_invoice");
+    expect(names).toContain("create_bill_payment");
+    const exportArtifacts = tools.find((tool) => tool.name === "export_qbo_artifact")
+      .inputSchema.properties.artifact.enum;
+    expect(exportArtifacts).toEqual(expect.arrayContaining(["invoice_pdf", "profit_and_loss", "general_ledger"]));
+    expect(exportArtifacts).not.toEqual(expect.arrayContaining(["estimate_pdf", "inventory_valuation", "vendor_expenses"]));
+    for (const n of ["query", "api_get", "api_request", "execute_batch", "delete_transaction", "connect_company"]) {
+      expect(names, n).not.toContain(n);
     }
-  });
+    // Prevent profile creep from silently returning to the former ~146 KB,
+    // 100+ tool default. Both count and serialized wire size affect model
+    // context and tool-selection quality.
+    // One explicit exporter replaced dozens of mixed read/write report fields;
+    // the single extra tool keeps those read contracts honest without adding a
+    // separate exporter for every report and PDF.
+    expect(names.length).toBeLessThanOrEqual(61);
+    expect(Buffer.byteLength(JSON.stringify(tools), "utf8")).toBeLessThanOrEqual(100_000);
+  }, 20_000);
 
-  afterAll(async () => {
-    await Promise.all(fixtures.map(([slug]) => rm(path.join(ROOT, `tokens.${slug}.json`), { force: true })));
-  });
+  it("can expose only the owner-oriented surface", async () => {
+    const tools = await listTools({ QBO_TOOL_PROFILE: "owner" });
+    const names = tools.map((t) => t.name);
+    expect(names).toContain("get_profit_and_loss");
+    expect(names).toContain("create_invoice");
+    expect(names).not.toContain("create_journal_entry");
+    expect(names).not.toContain("set_company_policy");
+    const exportArtifacts = tools.find((tool) => tool.name === "export_qbo_artifact")
+      .inputSchema.properties.artifact.enum;
+    expect(exportArtifacts).toContain("estimate_pdf");
+    expect(exportArtifacts).not.toContain("general_ledger");
+  }, 20_000);
+});
+
+describe("company response provenance", () => {
+  async function writeTokenFixture(slug, realmId) {
+    const future = Date.now() + 3_600_000;
+    const tokenFile = path.join(ROOT, `tokens.${slug}.json`);
+    const tokenStage = `${tokenFile}.${process.pid}.${randomUUID()}.tmp`;
+    await writeFile(tokenStage, JSON.stringify({
+      access_token: "test-access-token",
+      refresh_token: "test-refresh-token",
+      expires_at: future,
+      realmId,
+      environment: "sandbox",
+    }));
+    await rename(tokenStage, tokenFile);
+    return tokenFile;
+  }
 
   it("labels an explicit company with the slug and realm that served it", async () => {
+    const fixture = await writeTokenFixture("provenance-a", "1000000000000001");
     const server = startServer();
     try {
       await initialize(server);
@@ -227,11 +476,13 @@ describe("company response provenance", () => {
         source: "explicit",
       });
     } finally {
-      server.stop();
+      await server.stop();
+      await rm(fixture, { force: true });
     }
   }, 20_000);
 
   it("keeps select_company as a disclosed process default", async () => {
+    const fixture = await writeTokenFixture("provenance-b", "1000000000000002");
     const server = startServer();
     try {
       await initialize(server);
@@ -244,19 +495,14 @@ describe("company response provenance", () => {
         source: "process_default",
       });
     } finally {
-      server.stop();
+      await server.stop();
+      await rm(fixture, { force: true });
     }
   }, 20_000);
 
   it("fails when an explicit slug resolves to another company's realm", async () => {
-    const duplicate = path.join(ROOT, "tokens.provenance-mismatch.json");
-    await writeFile(duplicate, JSON.stringify({
-      access_token: "test-access-token",
-      refresh_token: "test-refresh-token",
-      expires_at: Date.now() + 3_600_000,
-      realmId: "1000000000000001",
-      environment: "sandbox",
-    }));
+    const original = await writeTokenFixture("provenance-a", "1000000000000001");
+    const duplicate = await writeTokenFixture("provenance-mismatch", "1000000000000001");
     const server = startServer();
     try {
       await initialize(server);
@@ -264,8 +510,8 @@ describe("company response provenance", () => {
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toMatch(/Resolved company mismatch/);
     } finally {
-      server.stop();
-      await rm(duplicate, { force: true });
+      await server.stop();
+      await Promise.all([original, duplicate].map((file) => rm(file, { force: true })));
     }
-  });
+  }, 20_000);
 });

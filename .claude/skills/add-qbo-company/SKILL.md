@@ -29,17 +29,35 @@ human:
 
 ## Before you start
 
-Confirm you're operating on this project. Resolve `PROJECT_DIR` (the
-`qbo-mcp-server` folder, e.g. `~/Desktop/qbo-mcp-server`) and `NODE` (absolute
-node path via `which node`, since Claude Desktop can't rely on `$PATH`). Use
-absolute paths everywhere; the Claude Desktop config requires them.
+Confirm you're operating on this project and choose commands for the user's
+actual shell. Resolve absolute `PROJECT_DIR`, `NODE`, and `PYTHON` paths;
+Claude Desktop cannot rely on the interactive shell's `PATH`.
+
+macOS/Linux (bash/zsh):
+```bash
+PROJECT_DIR="$(cd ~/Desktop/qbo-mcp-server && pwd)"
+NODE="$(command -v node)"
+PYTHON="$(command -v python3 || command -v python)"
+```
+
+Windows PowerShell:
+```powershell
+$PROJECT_DIR = (Resolve-Path "$env:USERPROFILE\Desktop\qbo-mcp-server").Path
+$NODE = (Get-Command node -ErrorAction Stop).Source
+$pythonCommand = Get-Command py -ErrorAction SilentlyContinue
+if (-not $pythonCommand) { $pythonCommand = Get-Command python -ErrorAction Stop }
+$PYTHON = $pythonCommand.Source
+```
+
+If the project lives elsewhere, use its real path. Do not translate the
+PowerShell examples into Unix environment-prefix syntax.
 
 ## Step 1: Gather the details
 
 Ask the user (don't guess; a wrong environment silently hits the wrong API, and
 a bad slug creates a phantom company):
 
-- **Slug**: a short, lowercase, `a-z0-9-` label (e.g. `8315`, `acme`,
+- **Slug**: a short, lowercase, `a-z0-9-` label (e.g. `acme`, `northwind`,
   `client-bakery`). This becomes the token filename and the name used in
   `select_company`. Keep it stable.
 - **Environment**: `sandbox` or `production`. If the user is unsure and it's a
@@ -50,62 +68,120 @@ a bad slug creates a phantom company):
   to paste secrets into the conversation, and **never type the user's Intuit
   login yourself**; that's theirs to enter in the browser.
 
-Sanity-check the current state first:
+Sanity-check the current state first.
+
+macOS/Linux:
 ```bash
-python3 .claude/skills/add-qbo-company/scripts/list_companies.py --project-dir "$PROJECT_DIR"
+cd "$PROJECT_DIR" && npm run doctor
+"$PYTHON" .claude/skills/add-qbo-company/scripts/list_companies.py --project-dir "$PROJECT_DIR"
 ```
-If the slug already shows as authorized, re-running connect refreshes it in
-place; confirm that's the intent.
+
+Windows PowerShell:
+```powershell
+Set-Location $PROJECT_DIR
+npm run doctor
+& $PYTHON "$PROJECT_DIR\.claude\skills\add-qbo-company\scripts\list_companies.py" --project-dir $PROJECT_DIR
+```
+`doctor` must not print secrets or contact Intuit. Resolve any credential-pair,
+policy, token-permission, or `QBO_FILES_DIR` error before continuing.
+If the slug already shows as authorized, stop and confirm the user intends to
+reauthorize that same realm/environment. Existing slugs require explicit
+replacement authority: add `-- --replace-existing` to the sandbox command or
+`--replace-existing` to the production Playground/catcher command. A different
+realm or environment must use a new slug; replacement deliberately refuses it.
 
 ## Step 2: Authorize (the human's part)
 
-Run the connect flow with `QBO_COMPANY` set so tokens land in the right file.
-Run it **in the background**; it starts a localhost:3000 listener and blocks
-until the browser callback arrives.
+Choose exactly one flow below. The three flows have different output markers
+and human handoffs; do not treat them as interchangeable.
 
+### Sandbox: localhost callback
+
+Set `QBO_COMPANY` so tokens land in the right file. This command starts a
+localhost:3000 listener and blocks until the browser callback arrives. If an
+agent launches it, use a background terminal task so its output remains
+visible; a user running it in their own terminal can leave it in the foreground.
+
+macOS/Linux:
 ```bash
 cd "$PROJECT_DIR" && QBO_COMPANY=<slug> npm run connect
 ```
 
-Adding several at once? Use the batch flow (log in once, pick + Allow each):
-```bash
-cd "$PROJECT_DIR" && npm run connect:batch
+Windows PowerShell:
+```powershell
+Set-Location $PROJECT_DIR
+$env:QBO_COMPANY = "<slug>"
+npm run connect
+Remove-Item Env:QBO_COMPANY -ErrorAction SilentlyContinue
 ```
 
-**Production companies cannot use the localhost flow** (Intuit rejects
-localhost redirect URIs outside the development environment). Use either
-working path; both verify the landed company and store tokens encrypted:
+Read the command output for `AUTHORIZE_URL>>> ... <<<` and give that URL to the
+user if the browser did not open. They log into the intended sandbox company,
+click **Allow**, and may close the tab after it shows **QuickBooks connected**.
 
+Adding several sandbox companies at once? From the project directory use the
+batch flow (log in once, then pick + Allow each). It also uses localhost:3000
+and emits `AUTHORIZE_URL>>> ... <<<` for each company:
 ```bash
-# RECOMMENDED: Intuit's OAuth 2.0 Playground. Paste back the Realm ID and
-# Refresh Token (input hidden); every hop stays on Intuit-operated pages and
-# there is nothing to host. One-time setup: add
-# https://developer.intuit.com/v2/OAuth2Playground/RedirectUrl as a Redirect
-# URI on the app's PRODUCTION keys page, and in the playground pick the SAME
-# app whose keys are in this project's .env, or the paste fails invalid_grant.
-cd "$PROJECT_DIR" && npm run connect:playground -- <slug>
-
-# ALTERNATIVE: a catcher page you host yourself. Requires
-# QBO_CATCHER_REDIRECT_URI in .env pointing at your own deployed copy of
-# docs/oauth-catcher/index.html, registered on the Intuit app. The flow
-# refuses to run without it; there is no default page.
-cd "$PROJECT_DIR" && npm run connect:catcher -- <slug>
+npm run connect:batch
 ```
 
-The connect flow tries to auto-open the browser, but don't rely on that alone.
-Read the command's output a second or two after launching, lift the URL between
-the `AUTHORIZE_URL>>> ... <<<` delimiters, and present it as a clickable link:
-> Your browser should open to Intuit. If it doesn't, click this link, log into
-> the company you want, pick the right one if prompted, and click **Allow**.
-> You'll see "QuickBooks connected"; close that tab.
+### Production: Intuit OAuth Playground (recommended)
 
-Only one `connect` can run at a time (they all use port 3000); never launch two
-in parallel.
+Production companies cannot use the localhost flow. Run this command in the
+foreground because it waits for interactive terminal input:
+
+```bash
+npm run connect:playground -- <slug>
+```
+
+It emits `PLAYGROUND_URL>>> ... <<<`, not `AUTHORIZE_URL>>>`. Open that URL and
+follow the numbered Playground instructions printed by the command. One-time
+setup: add
+`https://developer.intuit.com/v2/OAuth2Playground/RedirectUrl` to the app's
+**Production** Redirect URIs. In the Playground select the same app whose
+production keys are in this project's `.env`, authorize the intended company,
+and click **Get tokens**. The running command then prompts:
+
+- `Paste the Realm ID:`
+- `Paste the Refresh Token (input hidden):`
+
+The user must paste both directly into that terminal. Never ask them to put the
+refresh token in the conversation or echo it back. The command exchanges,
+encrypts, verifies, and reports the authorized company when complete.
+
+### Production alternative: hosted catcher
+
+This requires `QBO_CATCHER_REDIRECT_URI` in `.env` to point at the user's own
+deployed copy of `docs/oauth-catcher/index.html`, registered on the same Intuit
+app. Run in the foreground:
+
+```bash
+npm run connect:catcher -- <slug>
+```
+
+This flow emits `AUTHORIZE_URL>>> ... <<<`. After the user authorizes, the
+catcher page says **QuickBooks authorization caught** and provides a copy
+button. Paste the line from the catcher page directly into the running command
+at `Paste the line from the catcher page here:`. The command verifies OAuth
+state, exchanges the one-time code, verifies the company, and then reports the
+authorized realm.
+
+Only the sandbox localhost and batch flows use port 3000. Run authorizations
+sequentially anyway so the human can verify each returned company before the
+next slug is touched.
 
 **Checkpoint**: confirm the token file was written with the expected
 realm/environment:
+
+macOS/Linux:
 ```bash
-python3 .claude/skills/add-qbo-company/scripts/list_companies.py --project-dir "$PROJECT_DIR"
+"$PYTHON" .claude/skills/add-qbo-company/scripts/list_companies.py --project-dir "$PROJECT_DIR"
+```
+
+Windows PowerShell:
+```powershell
+& $PYTHON "$PROJECT_DIR\.claude\skills\add-qbo-company\scripts\list_companies.py" --project-dir $PROJECT_DIR
 ```
 The new slug should read `AUTHORIZED=yes` with the right `ENV`. If token
 exchange failed for a production company, it's almost always sandbox keys or an
@@ -115,9 +191,16 @@ unregistered redirect URI; see
 ## Step 3: Ensure the unified connector exists (first time only)
 
 If `list_companies.py` says the unified connector is missing, register it:
+
+macOS/Linux:
 ```bash
-python3 .claude/skills/add-qbo-company/scripts/register_connector.py \
+"$PYTHON" .claude/skills/add-qbo-company/scripts/register_connector.py \
   --project-dir "$PROJECT_DIR" --node "$NODE"
+```
+
+Windows PowerShell:
+```powershell
+& $PYTHON "$PROJECT_DIR\.claude\skills\add-qbo-company\scripts\register_connector.py" --project-dir $PROJECT_DIR --node $NODE
 ```
 The script backs up the config, refuses to touch corrupt JSON, and is
 idempotent. It registers ONE `qbo` entry with no per-company env; the company
@@ -129,8 +212,9 @@ is picked at runtime.
 
 - Connector already existed: **no restart**. The new company is live now; prove
   it with the `health_check` or `list_companies` tool in Claude Desktop.
-- Connector newly registered: Claude Desktop needs one full relaunch (**Quit**
-  with Cmd-Q, not just closing the window) to load it.
+- Connector newly registered: Claude Desktop needs one full relaunch to load
+  it. On macOS use **Quit** / Cmd-Q; on Windows exit Claude Desktop completely
+  (including its tray process if present), then reopen it.
 
 ## Wrap up
 
@@ -141,8 +225,9 @@ for real, and per-company guardrails can be set in `qbo-policy.json`.
 
 ## Related tasks
 
-- **Switch companies while working**: just say *"work on <slug>"*
-  (`select_company`); nothing to reconfigure.
+- **Switch companies while working**: `select_company` remains convenient for
+  reads. Every write must still carry the explicit slug; never treat the active
+  read selection as posting authority.
 - **Remove a company**: `npm run disconnect -- <slug>`. This revokes the OAuth
   grant with Intuit and deletes the token file, which is the complete
   offboarding step. If a legacy `qbo-<slug>` connector entry exists, remove it

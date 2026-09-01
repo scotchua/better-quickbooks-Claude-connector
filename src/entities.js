@@ -2,7 +2,7 @@
 // accounting guardrails shared by the tools.
 
 import { qboQuery, qboRequest } from "./qbo.js";
-import { esc, assertId, normalizeName, todayISO } from "./util.js";
+import { esc, assertId, normalizeName, isRealCalendarDate } from "./util.js";
 
 // ---- paginated queries ------------------------------------------------------
 
@@ -126,22 +126,68 @@ export async function findAnyServiceItem(company) {
 // ---- closed-period guardrail ------------------------------------------------
 
 // The books-closed date from company Preferences, cached for 5 minutes per
-// company. Returns null when unset or unreadable (a preferences hiccup must
-// never block a write on its own).
+// company. In block mode, an unreadable close date blocks the write: treating
+// an outage as "books are open" defeats the purpose of a fail-closed setting.
 const prefsCache = new Map(); // company -> { at, closeDate }
 const PREFS_TTL_MS = 5 * 60 * 1000;
+const CLOSED_PERIOD_MODES = new Set(["warn", "block", "off"]);
 
-export async function getBookCloseDate(company) {
+export function closedPeriodMode(raw = process.env.QBO_CLOSED_PERIOD) {
+  const mode = String(raw || "warn").trim().toLowerCase();
+  if (!CLOSED_PERIOD_MODES.has(mode)) {
+    throw new Error(
+      `QBO_CLOSED_PERIOD must be warn, block, or off; received ${JSON.stringify(raw)}. ` +
+      "Refusing to guess which accounting-period guardrail was intended."
+    );
+  }
+  return mode;
+}
+
+async function getBookCloseDateState(company) {
+  const mode = closedPeriodMode();
   const key = company ?? "";
   const hit = prefsCache.get(key);
-  if (hit && Date.now() - hit.at < PREFS_TTL_MS) return hit.closeDate;
+  if (hit && Date.now() - hit.at < PREFS_TTL_MS) return { closeDate: hit.closeDate, warning: null };
   let closeDate = null;
   try {
     const r = await qboRequest(`/preferences`, { company });
     closeDate = r.Preferences?.AccountingInfoPrefs?.BookCloseDate || null;
-  } catch { /* leave null */ }
+  } catch (e) {
+    if (mode === "block") {
+      throw new Error(
+        `Cannot verify the QuickBooks book-close date (${e.message}). QBO_CLOSED_PERIOD=block therefore refuses this write; ` +
+        `restore connectivity or explicitly choose warn/off after reviewing the risk.`
+      );
+    }
+    // A stale known value is safer than pretending the books were never
+    // closed during a transient Preferences failure.
+    if (hit) {
+      return {
+        closeDate: hit.closeDate,
+        warning:
+          `Could not refresh the QuickBooks book-close date (${e.message}); using the last verified value ` +
+          `${hit.closeDate || "that the books were open"} from ${new Date(hit.at).toISOString()}.`,
+      };
+    }
+    return {
+      closeDate: null,
+      warning:
+        `Could not verify the QuickBooks book-close date (${e.message}). QBO_CLOSED_PERIOD=warn permits the write, ` +
+        "but the connector could not determine whether it affects closed books; review the transaction in QuickBooks.",
+    };
+  }
+  if (closeDate != null && !isRealCalendarDate(closeDate)) {
+    throw new Error(
+      `QuickBooks returned an invalid BookCloseDate (${JSON.stringify(closeDate)}) for ${key || "the default company"}. ` +
+      "The connector will not treat malformed accounting preferences as open books; correct the preference in QuickBooks and retry."
+    );
+  }
   prefsCache.set(key, { at: Date.now(), closeDate });
-  return closeDate;
+  return { closeDate, warning: null };
+}
+
+export async function getBookCloseDate(company) {
+  return (await getBookCloseDateState(company)).closeDate;
 }
 
 // Check transaction dates against the books-closed date.
@@ -149,18 +195,33 @@ export async function getBookCloseDate(company) {
 // tool response. QBO_CLOSED_PERIOD=block: throws instead.
 // QBO_CLOSED_PERIOD=off: skips the check.
 export async function closedPeriodWarnings(company, dates) {
-  const mode = (process.env.QBO_CLOSED_PERIOD || "warn").toLowerCase();
+  const mode = closedPeriodMode();
   if (mode === "off") return [];
-  const closeDate = await getBookCloseDate(company);
-  if (!closeDate) return [];
-  const checked = (dates || []).map((d) => d || todayISO()).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d));
-  const inClosed = checked.filter((d) => d <= closeDate);
-  if (!inClosed.length) return [];
-  const msg = `Books are closed through ${closeDate}; this posts into the closed period (date ${inClosed.join(", ")}).`;
-  if (mode === "block") {
-    throw new Error(`${msg} Set QBO_CLOSED_PERIOD=warn to allow with a warning, or use a date after ${closeDate}.`);
+  const { closeDate, warning: verificationWarning } = await getBookCloseDateState(company);
+  if (!closeDate) return verificationWarning ? [verificationWarning] : [];
+  const supplied = dates || [];
+  const checked = supplied.filter((date) => isRealCalendarDate(date));
+  const unverifiable = supplied.length - checked.length;
+  const warnings = verificationWarning ? [verificationWarning] : [];
+  if (unverifiable) {
+    const msg =
+      `Books are closed through ${closeDate}, but ${unverifiable === 1 ? "a posting write has" : `${unverifiable} posting writes have`} ` +
+      "no valid explicit TxnDate. Intuit defaults an omitted date from QuickBooks server time without documenting its " +
+      "timezone, so the connector cannot prove the write is outside the closed period. Supply TxnDate explicitly as YYYY-MM-DD.";
+    if (mode === "block") {
+      throw new Error(`${msg} QBO_CLOSED_PERIOD=block therefore refuses this write.`);
+    }
+    warnings.push(msg);
   }
-  return [msg];
+  const inClosed = checked.filter((d) => d <= closeDate);
+  if (inClosed.length) {
+    const msg = `Books are closed through ${closeDate}; this write affects the closed period (date ${inClosed.join(", ")}).`;
+    if (mode === "block") {
+      throw new Error(`${msg} Set QBO_CLOSED_PERIOD=warn to allow with a warning, or use a date after ${closeDate}.`);
+    }
+    warnings.push(msg);
+  }
+  return warnings;
 }
 
 // Attach warnings to a tool response payload when there are any.

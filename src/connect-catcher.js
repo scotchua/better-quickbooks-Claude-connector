@@ -22,10 +22,10 @@
 // company is authorized in one step with no import from anywhere else.
 
 import readline from "node:readline";
-import { exec } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { parse as parseQuery } from "node:querystring";
-import { credentials, exchangeCodeForTokens, saveTokens, sanitizeSlug, qboRequest, listCompanies } from "./qbo.js";
+import { credentials, exchangeCodeForTokens, persistAuthorization, assertSlug, getCompanyInfoWithTokens, listCompanies } from "./qbo.js";
 
 const AUTHORIZE_URL = "https://appcenter.intuit.com/connect/oauth2";
 const SCOPE = "com.intuit.quickbooks.accounting";
@@ -54,10 +54,14 @@ function catcherRedirectUri() {
 }
 
 function openBrowser(url) {
-  const cmd = process.platform === "darwin" ? `open "${url}"`
-    : process.platform === "win32" ? `start "" "${url}"`
-    : `xdg-open "${url}"`;
-  exec(cmd, (err) => { if (err) log("Could not auto-open the browser; use the URL above."); });
+  const [command, args] = process.platform === "darwin"
+    ? ["open", [url]]
+    : process.platform === "win32"
+      ? ["rundll32.exe", ["url.dll,FileProtocolHandler", url]]
+      : ["xdg-open", [url]];
+  const child = spawn(command, args, { detached: true, stdio: "ignore", windowsHide: true });
+  child.once("error", () => log("Could not auto-open the browser; use the URL above."));
+  child.unref();
 }
 
 function ask(question) {
@@ -82,14 +86,65 @@ function parsePasted(pasted) {
   };
 }
 
+// Reusing a slug is an overwrite, not a convenience default. Check once before
+// any browser work, then again with the returned realm immediately before the
+// token file can be replaced. The second check also closes the ordinary race
+// where a different process connects this slug while the operator is in Intuit.
+export function assertSafeExistingSlug(existing, {
+  slug,
+  environment,
+  realmId,
+  replaceExisting = false,
+} = {}) {
+  if (!existing) return;
+  const existingEnvironment = String(existing.environment ?? "").toLowerCase();
+  const requestedEnvironment = String(environment ?? "").toLowerCase();
+  const identity = `realm ${existing.realmId ?? "unknown"}, ${existing.environment ?? "unknown environment"}`;
+
+  if (replaceExisting !== true) {
+    throw new Error(
+      `Company slug "${slug}" is already authorized (${identity}). Refusing to replace it without explicit ` +
+      `replaceExisting: true. Use a new slug if this is a different company or authorization.`
+    );
+  }
+  if (!existingEnvironment || existingEnvironment !== requestedEnvironment) {
+    throw new Error(
+      `Company slug "${slug}" is already authorized as ${identity}, but this flow is for ` +
+      `${environment ?? "an unknown environment"}. Refusing to overwrite it. Use a new slug for a different environment.`
+    );
+  }
+  if (realmId != null && String(existing.realmId ?? "") !== String(realmId)) {
+    throw new Error(
+      `Company slug "${slug}" is already authorized to realm ${existing.realmId ?? "unknown"} in ` +
+      `${existing.environment}, but Intuit returned realm ${realmId} in ${environment}. Refusing to overwrite it; ` +
+      `use a new slug for a different company.`
+    );
+  }
+}
+
 /**
  * Authorize one production company through the hosted catcher.
  * @param {string} slug   Company slug; becomes tokens.<slug>.json.
  * @param {string} environment "production" (default) or "sandbox".
+ * @param {object} opts { openBrowserWindow = true, replaceExisting = false }
  */
-export async function connectViaCatcher(slug, environment = "production", { openBrowserWindow = true } = {}) {
-  const clean = sanitizeSlug(slug);
+export async function connectViaCatcher(
+  slug,
+  environment = "production",
+  { openBrowserWindow = true, replaceExisting = false } = {}
+) {
+  const clean = assertSlug(slug);
   if (!clean) throw new Error("Give a company slug of letters, numbers, or hyphens.");
+  const env = String(environment).toLowerCase();
+  if (env !== "production" && env !== "sandbox") {
+    throw new Error(`environment must be "production" or "sandbox", got "${environment}".`);
+  }
+
+  // This is intentionally the first I/O in the flow: an existing slug without
+  // explicit replacement authority must fail before configuration checks,
+  // browser launch, or asking the operator to paste anything.
+  const existing = (await listCompanies()).find((c) => c.slug === clean);
+  assertSafeExistingSlug(existing, { slug: clean, environment: env, replaceExisting });
 
   const redirectUri = catcherRedirectUri();
   // credentials() and exchangeCodeForTokens both read QBO_REDIRECT_URI, and
@@ -101,21 +156,20 @@ export async function connectViaCatcher(slug, environment = "production", { open
   // Fail before opening a browser. Without this, missing keys produce an
   // authorize URL carrying an empty client_id, so the operator is sent to an
   // Intuit error page and asked to paste something they can never get.
-  credentials(environment);
+  const creds = credentials(env);
 
-  const existing = (await listCompanies()).find((c) => c.slug === clean);
   if (existing) {
     log(`Note: "${clean}" is already authorized (realm ${existing.realmId}, ${existing.environment}).`);
-    log("Completing this will replace that authorization.");
+    log("Replacement was explicitly authorized; the returned realm must match before anything is saved.");
   }
 
   const state = randomBytes(16).toString("base64url");
   const authUrl =
-    `${AUTHORIZE_URL}?client_id=${encodeURIComponent(process.env.QBO_CLIENT_ID || "")}` +
+    `${AUTHORIZE_URL}?client_id=${encodeURIComponent(creds.clientId)}` +
     `&response_type=code&scope=${encodeURIComponent(SCOPE)}` +
     `&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}`;
 
-  log(`Authorizing "${clean}" as ${environment}.`);
+  log(`Authorizing "${clean}" as ${env}.`);
   log(openBrowserWindow
     ? "Opening Intuit. Log in, pick the company, and click Allow."
     : "Open this URL yourself (browser launch suppressed by --no-browser):");
@@ -143,33 +197,41 @@ export async function connectViaCatcher(slug, environment = "production", { open
     );
   }
 
-  const tokens = { ...(await exchangeCodeForTokens(code, environment)), realmId: String(realmId) };
-  await saveTokens(clean, tokens);
+  // Bind replacement permission to the same company/environment the slug
+  // already names. Re-read to catch a slug created or changed during OAuth.
+  assertSafeExistingSlug(existing, {
+    slug: clean,
+    environment: env,
+    realmId,
+    replaceExisting,
+  });
 
-  // Confirm which file actually landed. An authorization that succeeds against
-  // the wrong company is the worst outcome, because everything downstream looks
-  // healthy while pointing at the wrong books.
-  let companyName = null, legalName = null, addressState = null, warning;
-  try {
-    const info = await qboRequest(`/companyinfo/${realmId}`, { company: clean });
-    companyName = info.CompanyInfo?.CompanyName ?? null;
-    legalName = info.CompanyInfo?.LegalName ?? null;
-    addressState = info.CompanyInfo?.CompanyAddr?.CountrySubDivisionCode ?? null;
-  } catch (e) {
-    warning = `Authorized, but reading the company name failed: ${e.message}`;
-  }
+  const tokens = { ...(await exchangeCodeForTokens(code, env)), realmId: String(realmId) };
+  const companyInfo = await getCompanyInfoWithTokens(tokens);
+  // The exchange does not persist anything. Re-read after that network round
+  // trip so the final identity check sits immediately in front of saveTokens.
+  const current = (await listCompanies()).find((c) => c.slug === clean);
+  assertSafeExistingSlug(current, {
+    slug: clean,
+    environment: tokens.environment ?? env,
+    realmId: tokens.realmId,
+    replaceExisting,
+  });
+  // The canonical commit rechecks slug replacement and realm uniqueness while
+  // holding slug-then-realm cross-process locks; this earlier network flow does
+  // not rely on a check-then-save window.
+  await persistAuthorization(clean, tokens, { replaceExisting });
 
   const twins = (await listCompanies()).filter((c) => c.realmId === String(realmId) && c.slug !== clean);
 
   return {
     slug: clean,
     realmId: String(realmId),
-    environment,
-    company_name: companyName,
-    legal_name: legalName,
-    address_state: addressState,
+    environment: env,
+    company_name: companyInfo.CompanyName ?? null,
+    legal_name: companyInfo.LegalName ?? null,
+    address_state: companyInfo.CompanyAddr?.CountrySubDivisionCode ?? null,
     duplicate_slugs: twins.length ? twins.map((c) => c.slug) : undefined,
-    warning,
     verify: "Confirm company_name is the client you intended before any report runs.",
   };
 }

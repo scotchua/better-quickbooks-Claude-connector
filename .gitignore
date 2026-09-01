@@ -5,19 +5,42 @@ node_modules/
 .env.bak*
 .env.*.bak
 tokens*.json
+tokens*.json.*.tmp
+.qbo-token-stage-*.json
+.qbo-token-stage-*.json.*.tmp
+.qbo-refresh-recovery-*.json
+.qbo-refresh-recovery-*.json.*.tmp
+.qbo-disconnect-recovery-*.json
+.qbo-disconnect-recovery-*.json.*.tmp
 .qbo-key*
 
-# Token-refresh lock files (transient; one per company while a refresh runs)
+# Owner-marker lock directories (transient; one per protected operation)
 .refresh-*.lock
+.realm-authorization-*.lock
+.csv-import-*.lock
+.csv-import-journal.lock
+.write-recovery.lock
+.write-recovery-request-*.lock
+.owner-lock-init-*
+.owner-lock-reclaim-*
+
+# Internal model-review instructions belong in the private MHPE workspace,
+# never in the public/forkable connector repository.
+/CLAUDE_REVIEW_PROMPT.md
+/REVIEW.md
 
 # Write guardrails (local, names clients). policy.js writes timestamped
 # backups as qbo-policy.json.bak-<stamp>, so the glob must be open-ended.
 qbo-policy.json
 qbo-policy.json.bak*
 qbo-policy.*.tmp
+qbo-policy.json.lock
 
 # Local records (write audit log, CSV import journal)
 audit-log/
+write-recovery.jsonl
+imports-journal.jsonl
+audit-*.jsonl
 
 # Downloaded documents (invoice/estimate PDFs)
 exports/
@@ -32,6 +55,8 @@ __pycache__/
 # Client roster (local labels, includes client names)
 clients.json
 clients.json.bak
+clients.json.*.tmp
+clients.json.lock
 
 # Token files kept but not in use. Company discovery reads the project root
 # only, so anything here is retained and never listed as a company.

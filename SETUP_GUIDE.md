@@ -10,8 +10,12 @@ takes a couple of minutes each, with no restart.
 > **What you'll end up with:** one **`qbo`** connector in Claude Desktop that can
 > reach **all** of your companies. You pick the company as you work: *"work on
 > acme"*, or name it in any request. No switching connectors, no restarts.
-> Anything that *changes* the books names its company explicitly, so a write can
-> never land in the wrong client's file.
+> Anything that *changes* the books names its company explicitly, so the target
+> is visible before approval and cannot be inherited from another conversation.
+>
+> The connector runs locally and is free to fork under Apache-2.0. It has no
+> hosted MHPE service or paid tier; firm-specific methodology stays in your
+> private skills and operating procedures, outside the generic connector.
 
 ---
 
@@ -57,10 +61,16 @@ The app needs two secret keys from Intuit so it can talk to QuickBooks.
 
 1. Go to [developer.intuit.com](https://developer.intuit.com) and sign in.
 2. Create a new app and choose the **Accounting** scope.
-3. Open the **Keys & OAuth** page and copy the **Client ID** and **Client Secret**.
-4. On that same page, add this exact **Redirect URI**:
-   `http://localhost:3000/callback`
-   *(If this is missing, the login in Step 6 will fail.)*
+3. Open the **Keys & OAuth** page for the environment you are connecting and
+   copy its **Client ID** and **Client Secret**.
+4. Add the redirect for the matching authorization flow:
+   - **Sandbox localhost flow:** `http://localhost:3000/callback`
+   - **Production Playground flow:**
+     `https://developer.intuit.com/v2/OAuth2Playground/RedirectUrl`
+   - **Optional production catcher:** the HTTPS URL of the catcher page you
+     deploy from `docs/oauth-catcher/`
+
+Registering the localhost URI does not enable production authorization.
 
 > **Sandbox vs. production:** Intuit gives you separate keys for **sandbox** (test
 > companies) and **production** (real client books), and each set only works
@@ -80,13 +90,28 @@ Claude confirms the keys are in place **without printing your secret** on screen
 > **Also set `QBO_FILES_DIR`.** In the same file, uncomment the
 > `QBO_FILES_DIR=~/Claude` line and point it at the folder where your client
 > files live. This keeps every file the app reads or writes inside that one
-> folder. Attaching a document to a QuickBooks record requires it, because that
-> is the one action that sends a file off your computer.
+> folder. Imports, reconciliation, report/PDF output, attachment downloads, and
+> document uploads are refused until this fence is configured.
 
-## Step 6: Connect your companies (log in once, click Allow)
+Claude then runs `npm run doctor`. This is a local, secret-redacting check of
+Node, credentials, the file fence, token permissions, policies, audit storage,
+the selected tool profile, and Claude Desktop configuration. It makes no Intuit
+network calls.
 
-Claude starts the connection flow and gives you a link (your browser usually opens
-on its own).
+## Step 6: Connect your companies
+
+**Real production books:** localhost OAuth is not accepted by Intuit. Claude
+runs `npm run connect:playground -- <slug>` for each company (or the optional
+HTTPS catcher documented in `README.md`). You choose the app/company in
+Intuit's OAuth Playground and paste back the Realm ID and refresh token through
+hidden terminal input. The app's **Production** Keys & OAuth page must contain
+`https://developer.intuit.com/v2/OAuth2Playground/RedirectUrl` exactly.
+
+**Sandbox test books:** Claude can use the localhost browser flow, including
+`npm run connect:batch` for several companies.
+
+For a sandbox batch, Claude starts the connection flow and gives you a link
+(your browser usually opens on its own).
 
 1. **Log into Intuit once**; it remembers you for the rest.
 2. **Pick the first company** and click **Allow**.
@@ -118,8 +143,10 @@ you'll see its **Tool permissions**.
 Every tool declares whether it only reads, whether it destroys anything, and
 whether running it twice is safe, so the list should already group sensibly.
 
-- **Read-only tools → Always allow.** They only look at the books: reports,
-  lists, searches, `health_check`, `api_get`.
+- **Pure reads → Always allow.** Lists, searches, `health_check`, and transaction
+  link traversal, reports, and inline PDF reads only look at the books.
+- **`export_qbo_artifact` → Needs approval.** This is the explicit local-file
+  boundary; it stays inside `QBO_FILES_DIR` and never replaces an existing file.
 - **Write tools → Needs approval.** They change the books, so keep a human in the
   loop: *Create invoice, Create bill, Create bill payment, Create journal entry,
   Void invoice, Import transactions from CSV*, and **`api_request`** (it can post
@@ -127,12 +154,21 @@ whether running it twice is safe, so the list should already group sensibly.
 - **`Delete transaction` → Never**, unless you have a specific reason. Voiding
   keeps the number trail; deleting does not.
 
+The default `core` profile keeps the everyday reporting, AR/AP, banking,
+close-review, and journal surface bounded while including local client labels
+and write policies. It hides OAuth administration, raw API, and permanent
+deletion. Set `QBO_TOOL_PROFILE` to `core`, `owner`, `bookkeeper`, `accountant`, `admin`,
+`developer`, or `full` in `.env` and restart the connector when a different
+surface is appropriate.
+
 > **Extra safety already built in:** writes must name their company (setting an
 > active one covers reading, not posting), the app warns when a change lands in a
 > closed period — including edits to transactions already sitting in one — keeps a
-> local log of everything it posts, requires a preview before importing a bank
+> durable intent before anything is sent, requires a preview before importing a bank
 > CSV, and can enforce per-company rules (like read-only clients) from a
-> `qbo-policy.json` file.
+> `qbo-policy.json` file. When a posting date is omitted, the app warns instead
+> of guessing QuickBooks' undocumented server-date timezone; closed-period
+> block mode requires the date explicitly.
 
 ## Step 10: Try it
 
@@ -204,11 +240,15 @@ which is the complete offboarding step.
 ## If something goes wrong
 
 The simplest fix for almost anything: **tell Claude Code what happened.** It can
-re-check the connection, re-authorize a company, or run `health_check` to test
-every company in one call.
+re-check the connection or run `health_check` to test every company in one call.
+For re-authorization, the environment matters: sandbox uses
+`QBO_COMPANY=<slug> npm run connect -- --replace-existing`; production uses
+`npm run connect:playground -- <slug> --replace-existing` or the configured
+HTTPS catcher with that flag. A different realm/environment is still refused.
 
 - **The connector didn't appear?** You probably just need the one-time full
   restart of Claude Desktop (Step 8).
-- **The login didn't work?** Ask Claude to start the connection again.
+- **The login didn't work?** Tell Claude whether the company is sandbox or
+  production so it starts the matching flow and redirect URI.
 - **Anything else?** Describe what you saw to Claude and it will take it from
   there.

@@ -1,10 +1,11 @@
 {
   "name": "qbo-mcp-server",
   "version": "1.1.0",
-  "description": "Custom MCP server connecting Claude Desktop directly to QuickBooks Online (read + write).",
+  "description": "Local MCP server for multi-company QuickBooks Online accounting workflows (read + write).",
   "type": "module",
   "main": "src/index.js",
   "scripts": {
+    "doctor": "node src/doctor.js",
     "start": "node src/index.js",
     "connect": "node src/index.js --connect",
     "connect:batch": "node src/index.js --connect-batch",
@@ -18,9 +19,14 @@
     "README.md",
     "SETUP_GUIDE.md",
     "SECURITY.md",
+    "DEVELOPER.md",
+    "TESTING.md",
+    "CONTRIBUTING.md",
     "LICENSE",
     "NOTICE",
     ".env.example",
+    ".claude/skills/add-qbo-company",
+    "docs/oauth-catcher",
     "qbo-policy.example.json",
     "claude_desktop_config.snippet.json"
   ],

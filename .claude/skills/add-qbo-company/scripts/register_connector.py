@@ -10,7 +10,7 @@ Usage (unified, the default):
   register_connector.py --project-dir /path/to/qbo-mcp-server --node /path/to/node
 
 Legacy per-company mode (deprecated; one qbo-<slug> connector per company):
-  register_connector.py --slug 8315 --project-dir ... --node ...
+  register_connector.py --slug acme --project-dir ... --node ...
 
 Extra env pairs (rarely needed) are merged in with repeatable --env KEY=VALUE.
 """
@@ -38,6 +38,21 @@ def config_path() -> str:
 
 def valid_slug(value: str) -> bool:
     return re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", value or "") is not None
+
+
+def valid_env_key(value: str) -> bool:
+    return re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value or "") is not None
+
+
+SENSITIVE_ENV_KEY = re.compile(
+    r"SECRET|TOKEN|PASS(?:WORD|WD)?|CREDENTIAL|PRIVATE[_-]?KEY|API[_-]?KEY|(?:^|[_-])KEY(?:$|[_-])",
+    re.IGNORECASE,
+)
+
+
+def env_value_for_display(key: str, value: str) -> str:
+    """Never echo values whose variable name plausibly denotes a credential."""
+    return "<hidden>" if SENSITIVE_ENV_KEY.search(key or "") else value
 
 
 def main() -> int:
@@ -76,10 +91,16 @@ def main() -> int:
 
     for pair in args.env:
         if "=" not in pair:
-            print(f"ERROR: --env '{pair}' must be KEY=VALUE", file=sys.stderr)
+            # The malformed argument may itself be a pasted secret. Explain the
+            # syntax without reflecting any of its bytes into logs/transcripts.
+            print("ERROR: --env argument must be KEY=VALUE (supplied value not shown)", file=sys.stderr)
             return 1
         k, v = pair.split("=", 1)
-        env[k.strip()] = v
+        key = k.strip()
+        if not valid_env_key(key):
+            print("ERROR: --env key is invalid (supplied key and value not shown)", file=sys.stderr)
+            return 1
+        env[key] = v
 
     path = args.config or config_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -98,6 +119,8 @@ def main() -> int:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         backup = f"{path}.bak-{stamp}"
         shutil.copy2(path, backup)
+        if os.name != "nt":
+            os.chmod(backup, 0o600)
         print(f"Backed up existing config to {backup}")
     else:
         cfg = {}
@@ -113,11 +136,13 @@ def main() -> int:
     with open(path, "w") as f:
         json.dump(cfg, f, indent=2)
         f.write("\n")
+    if os.name != "nt":
+        os.chmod(path, 0o600)
 
     verb = "Updated" if existed else "Added"
     print(f"{verb} connector '{server_key}' in {path}")
     for k, v in env.items():
-        shown = v if k not in ("QBO_CLIENT_SECRET",) else "<hidden>"
+        shown = env_value_for_display(k, v)
         print(f"  {k}={shown}")
     if not existed:
         print("Restart Claude Desktop once (full quit) to load the new connector.")

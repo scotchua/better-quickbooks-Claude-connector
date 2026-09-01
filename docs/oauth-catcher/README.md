@@ -19,8 +19,12 @@ The tool now ships with no page set at all. You pick one of two routes:
   you control and point the tool at it, which is what the rest of this file
   covers.
 
-Security is the same either way. What you paste back is single use, expires
-within minutes, and is worthless to anyone without your own secret key.
+The pasted values are not equivalent. The hosted-catcher route returns a
+short-lived, single-use authorization code that is useless without your app's
+client secret. Intuit's Playground instead gives you a reusable refresh token:
+treat it as a sensitive bearer credential. The CLI hides that input, stages it
+encrypted, and immediately validates it through Intuit; do not share it or keep
+another copy outside the connector's protected token storage.
 
 ## The page
 

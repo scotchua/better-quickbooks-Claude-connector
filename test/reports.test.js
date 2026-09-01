@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { flattenReport, toNumber, consolidateReports, glFlatten, flagGlRows, reportReceipt, serializeReportInline } from "../src/reports.js";
 
 const pnl = (income, rentName, rentAmt) => ({
@@ -73,6 +75,10 @@ describe("consolidateReports", () => {
     expect(rent.combined_total).toBe(50);
     expect(out.rows.find((r) => r.name === "Software").amounts).toEqual({ b: 75 });
   });
+  it("refuses duplicate companies instead of doubling their totals", () => {
+    const acme = { company: "acme", flat: flattenReport(pnl(100, "Rent", 50)) };
+    expect(() => consolidateReports([acme, acme])).toThrow(/appears more than once/);
+  });
 });
 
 describe("glFlatten + flags", () => {
@@ -140,7 +146,7 @@ describe("serializeReportInline", () => {
     let msg = "";
     try { serializeReportInline(big(5000), 1000); } catch (e) { msg = e.message; }
     expect(msg).toMatch(/^CustomerBalanceDetail came back at [\d,]+ characters/);
-    expect(msg).toContain("save_path");
+    expect(msg).toContain("export_qbo_artifact");
     expect(msg).toContain("customer or vendor filter");   // the filter that actually works
     expect(msg).toContain("QBO_REPORT_MAX_INLINE_CHARS");
   });
@@ -168,8 +174,9 @@ describe("reportReceipt", () => {
   };
 
   it("names the file, the size and enough of the header to confirm the window", () => {
-    const out = reportReceipt(hdr, "/tmp/pl.json", 157900);
-    expect(out).toContain("/tmp/pl.json");
+    const dest = path.join(tmpdir(), "pl.json");
+    const out = reportReceipt(hdr, dest, 157900);
+    expect(out).toContain(dest);
     expect(out).toContain("157,900 bytes");
     expect(out).toContain("ProfitAndLoss");
     expect(out).toContain("2025-02-01 to 2026-07-31");
@@ -178,14 +185,16 @@ describe("reportReceipt", () => {
   });
 
   it("degrades to just the file line when the report carries no header", () => {
-    expect(reportReceipt({}, "/tmp/x.json", 12)).toBe("Saved 12 bytes to /tmp/x.json");
-    expect(reportReceipt(null, "/tmp/x.json", 12)).toBe("Saved 12 bytes to /tmp/x.json");
+    const dest = path.join(tmpdir(), "x.json");
+    expect(reportReceipt({}, dest, 12)).toBe(`Saved 12 bytes to ${dest}`);
+    expect(reportReceipt(null, dest, 12)).toBe(`Saved 12 bytes to ${dest}`);
   });
 
   it("omits header parts the report does not carry", () => {
-    const out = reportReceipt({ Header: { ReportName: "AgedReceivables" } }, "/tmp/ar.json", 5);
+    const dest = path.join(tmpdir(), "ar.json");
+    const out = reportReceipt({ Header: { ReportName: "AgedReceivables" } }, dest, 5);
     const [fileLine, descLine] = out.split("\n");
-    expect(fileLine).toBe("Saved 5 bytes to /tmp/ar.json");
+    expect(fileLine).toBe(`Saved 5 bytes to ${dest}`);
     expect(descLine).toBe("AgedReceivables");   // no empty period or basis fragments trailing it
     expect(out).not.toContain("undefined");
     expect(out).not.toContain("null");

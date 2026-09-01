@@ -19,7 +19,8 @@ npm install
 npm test
 ```
 
-**Pass:** `Tests 156 passed (156)`. This covers the security-critical logic:
+**Pass:** every test file passes; use the count printed by the current run
+(the suite grows with each safety contract). This covers the security-critical logic:
 query escaping, CSV sign and date handling, the import journal's crash-window
 resume, write-policy enforcement including its fail-closed behaviour on an
 unreadable or malformed policy file, destructive-path detection for the raw
@@ -30,7 +31,7 @@ duplicate clustering, policy enforcement, and filter allowlists.
 
 The suite also includes `test/server-contract.test.js`, which starts the real
 server, speaks MCP over stdio, and asserts what a client actually receives: the
-full 115-tool surface, a description and input schema on every tool, correct
+current full-profile surface, a description and input schema on every tool, correct
 read-only/destructive annotations, the reported version matching package.json,
 and both kill switches removing exactly the right tools. That is the only test
 exercising registration itself, so it is the one that catches a broken import or
@@ -39,13 +40,14 @@ a mis-derived annotation before Claude Desktop does.
 You can still confirm startup by hand:
 
 ```bash
-node src/index.js < /dev/null            # ctrl-C after the startup line
-QBO_DISABLE_WRITES=true node src/index.js < /dev/null
-QBO_DISABLE_DELETES=true node src/index.js < /dev/null
+QBO_TOOL_PROFILE=full node src/index.js < /dev/null
+QBO_TOOL_PROFILE=full QBO_DISABLE_WRITES=true node src/index.js < /dev/null
+QBO_TOOL_PROFILE=full QBO_DISABLE_DELETES=true node src/index.js < /dev/null
 ```
 
-**Pass:** the first prints `QBO MCP server running (stdio).`; the second reports
-52 write tools suppressed; the third reports 4.
+**Pass:** every command prints a startup line containing `profile=full`. The
+second reports write tools suppressed and the third reports delete/void tools
+suppressed. The contract test, rather than this prose, owns the exact counts.
 
 ---
 
@@ -54,7 +56,10 @@ QBO_DISABLE_DELETES=true node src/index.js < /dev/null
 ### Setup
 
 1. Sandbox keys from [developer.intuit.com](https://developer.intuit.com) in
-   `.env`, with `QBO_ENVIRONMENT=sandbox`.
+   `.env`, with `QBO_ENVIRONMENT=sandbox`. Register
+   `http://localhost:3000/callback` on the app's development Keys & OAuth page.
+   Set `QBO_FILES_DIR` to a test-data folder and keep every CSV/download used
+   below inside it.
 2. Create a second sandbox company in the developer portal (you need two to test
    the fleet tools).
 3. Authorize both:
@@ -118,8 +123,11 @@ QBO_DISABLE_DELETES=true node src/index.js < /dev/null
       Pass: the second is refused before anything is sent to QuickBooks.
 - [ ] **Setup entities.** *"Create a class called Ketchikan and a location
       called Longview in test1."* Then post an expense tagged to that class.
-- [ ] **PDF.** *"Download the PDF for invoice <id> in test1."*
-      Pass: a real PDF lands in `exports/` and opens.
+- [ ] **PDF read/export split.** *"Read the PDF for invoice <id> in test1."*
+      Pass: the PDF returns inline and no local file is created. Then ask to
+      export it to a new path inside `QBO_FILES_DIR` with
+      `export_qbo_artifact`. Pass: the file opens, and repeating the same path
+      is refused rather than overwritten.
 - [ ] **Closed period.** In the sandbox QuickBooks UI set a closing date (gear
       icon, Account and settings, Advanced, Close the books). Post a journal
       entry dated before it.
@@ -129,7 +137,7 @@ QBO_DISABLE_DELETES=true node src/index.js < /dev/null
 
 ### Bank CSV
 
-Save this as `test-bank.csv`:
+Save this as `test-bank.csv` inside `QBO_FILES_DIR`:
 
 ```csv
 Date,Description,Amount
@@ -154,7 +162,10 @@ Date,Description,Amount
       Pass: one candidate group containing both.
 - [ ] **Gated delete.** Delete one of those duplicates with
       *"delete purchase <id> from test1."*
-      Pass: it is removed, and the response echoes what was deleted.
+      This one check requires the `full` profile; set `QBO_TOOL_PROFILE=full`
+      and restart the connector before running it. Pass: the record is removed,
+      and the response echoes what was deleted. Restore the intended profile
+      afterward.
 
 ### Multi-company
 
@@ -170,7 +181,8 @@ Date,Description,Amount
 
 ### Governance
 
-- [ ] **Audit trail.** `cat audit-log/audit-2026-07.jsonl`
+- [ ] **Audit trail.** Open the current month's
+      `audit-log/audit-YYYY-MM.jsonl` file.
       Pass: one line per write you made, each with company, realm, entity,
       amount, and an `intuit_tid`.
 - [ ] **Policy: read-only client.** Copy `qbo-policy.example.json` to
@@ -180,10 +192,12 @@ Date,Description,Amount
 - [ ] **Policy: amount ceiling.** Change it to
       `{"defaults": {"max_write_amount": 100}}` and try a $250 invoice.
       Pass: refused. Delete `qbo-policy.json` when done.
-- [ ] **Read-only deployment.** Set `QBO_DISABLE_WRITES=true` in `.env`, restart
+- [ ] **QBO posting-off deployment.** Set `QBO_DISABLE_WRITES=true` in `.env`, restart
       Claude Desktop, and open Settings, Connectors, qbo.
-      Pass: the write tools are **gone from the list**, not merely blocked.
-      Remove the setting and restart to get them back.
+      Pass: QBO bookkeeping/outward-write tools are **gone from the list**, not
+      merely blocked. Local session/config/file tools and OAuth administration
+      remain when the selected profile includes them. Remove the setting and
+      restart to get the posting tools back.
 - [ ] **Offboarding.** `npm run disconnect -- test3`
       Pass: it reports the revocation and the token file is gone.
 
@@ -193,10 +207,12 @@ Date,Description,Amount
 
 Do this on the firm's own books first, never a client's.
 
-1. **Connect one production company** with production keys
-   (`QBO_ENVIRONMENT=production`). Note: if Intuit rejects the localhost
-   redirect for production, that is an Intuit app-setup constraint, not a bug
-   here; check the app's Redirect URIs in the developer portal.
+1. **Connect one production company** with production keys. Register
+   `https://developer.intuit.com/v2/OAuth2Playground/RedirectUrl` on the app's
+   production Keys & OAuth page, then run
+   `npm run connect:playground -- firm-pilot`. Production does not use the
+   localhost callback. The optional alternative is the self-hosted HTTPS catcher
+   documented in `README.md`.
 2. **Start read-only.** Put the company in `qbo-policy.json` with
    `read_only: true` before doing anything else. Then exercise reports,
    searches, `reconcile_bank_csv`, and `get_general_ledger_flat` freely with
@@ -205,9 +221,14 @@ Do this on the firm's own books first, never a client's.
    customer, then void it. Verify both in the QuickBooks UI and in
    `audit-log/`.
 4. **Set tool permissions** in Claude Desktop, Settings, Connectors, qbo:
-   - Reads, searches, `health_check`, `api_get`: **Always allow**
+   - Pure reads, searches, reports, inline PDFs, `health_check`: **Always allow**
+   - `export_qbo_artifact`: **Needs approval** (explicit fenced local write; no overwrite)
+   - `preview_bank_csv_import`: **Needs approval** (local preview-journal write; no QBO posting)
+   - `api_get`: **Always allow** only when using the developer/full profile
    - Every create/update/send/void/delete, `import_transactions_from_csv`, and
-     `api_request`: **Needs approval**
+     other ordinary writes: **Needs approval**
+   - `api_request`: **Never** by default. Enable **Needs approval** only for an
+     intentional raw/recovery call, then disable it again.
 5. **Then onboard clients**, one at a time, each starting read-only.
 
 ---
@@ -223,21 +244,28 @@ Do this on the firm's own books first, never a client's.
   be worked by hand, and an edit to a previously reconciled transaction is
   invisible here. Pass `statement_ending_balance` to get the tie-out; without
   it you get the unmatched lists only.
-- **A write that times out is ambiguous, but recoverable.** The error now
-  carries a `request_id`. Check QuickBooks first; if the transaction is not
-  there, re-send with `api_request` passing that same `request_id` and the
-  identical body. Intuit returns the original if it did land, so the replay
-  cannot double-post. Changing the body while reusing the id is refused,
-  because Intuit would return the original and drop the new write silently.
+- **A write that times out is ambiguous, but recoverable.** The error carries a
+  `request_id`, and `list_unresolved_writes` shows the local body-free recovery
+  queue, including `replay_eligible`, age, and deadline. Check QuickBooks first;
+  for a recent eligible single-request tool, call that same tool again with
+  identical arguments and the `request_id`. The connector refuses replay after
+  the conservative local age window because Intuit publishes no retention
+  guarantee for its deduplication record.
+  Changing the body while reusing the id is refused, because Intuit would
+  return the original and drop the new write silently. Raw `api_request` replay
+  remains available in developer/full profiles for exceptional cases.
+  Composite workflows intentionally omit generic replay; verify their partial
+  result and use their resume journal or dedicated single-record tools.
 - **Change data capture** covers roughly the last 30 days only.
 - **Duplicate detection** flags candidates, not conclusions. Legitimate repeats
   (rent, subscriptions) look identical to duplicates.
 - **Inventory quantity adjustments** are not exposed *by this connector*. They
   are available in Intuit's Accounting API through the `InventoryAdjustment`
-  entity, which is queryable today under the standard accounting scope; the
-  connector simply does not wrap it yet. Reach it with `api_get` or `query` for
-  reads. (An earlier version of this file said the API did not support them at
-  all. That was wrong.)
+  entity, but it is **not queryable**: Intuit documents create, update, delete,
+  and direct read-by-ID only. The connector's raw closed-period guard therefore
+  uses `/inventoryadjustment/<id>` for updates. Use `api_get` with a known ID or
+  carefully sandbox-test raw writes under a developer/full profile until named
+  tools are added. Availability is also company/SKU dependent.
 - **Payroll runs** genuinely are not exposed by Intuit's accounting API; those
   stay in the QuickBooks UI and your payroll system.
 - **`delete_transaction` is permanent.** Prefer `void_invoice` for invoices so
@@ -254,4 +282,6 @@ Collect these three things and the cause is usually obvious:
 
 Rollback levers, all in `.env`: `QBO_TOKEN_ENCRYPTION=off` (revert to plaintext
 token files), `QBO_CLOSED_PERIOD=off`, `QBO_AUDIT=off`, and
-`QBO_DISABLE_WRITES=true` (lock the whole thing down to reads).
+`QBO_DISABLE_WRITES=true` (remove QBO bookkeeping/outward-write tools while
+leaving profile-allowed OAuth administration and local config/session/export/
+download mutations available).

@@ -39,10 +39,41 @@ jobs:
           npm pack --dry-run --json > /tmp/pack.json
           node -e '
             const files = JSON.parse(require("fs").readFileSync("/tmp/pack.json","utf8"))[0].files.map(f => f.path);
-            const bad = files.filter(p => /^\.claude\/|^\.env$|^tokens.*\.json$|^qbo-policy\.json$|^clients\.json|^audit-log\/|\.lock$/.test(p));
+            const forbidden = /^(?:(?:CLAUDE_REVIEW_PROMPT|REVIEW)\.md$|tokens.*\.json(?:$|\.)|\.qbo-(?:token-stage|refresh-recovery|disconnect-recovery)-.*\.json(?:$|\.)|\.qbo-key(?:$|\.)|(?:\.refresh-|\.realm-authorization-).*\.lock(?:\/|$)|\.owner-lock-(?:init|reclaim)-|qbo-policy\.json(?:$|\.)|clients\.json(?:$|\.)|audit-log\/)|(?:^|\/)[^/]*\.lock(?:\/|$|\.)|(?:^|\/)(?:write-recovery|imports-journal|audit-[^/]*)\.jsonl$/;
+            const bad = files.filter(p =>
+              p === ".env" ||
+              (p.startsWith(".env.") && p !== ".env.example") ||
+              (p.startsWith(".claude/") && !p.startsWith(".claude/skills/add-qbo-company/")) ||
+              forbidden.test(p)
+            );
             if (bad.length) { console.error("Refusing to publish:", bad); process.exit(1); }
             console.log(`packaging clean (${files.length} files)`);
           '
+
+  # Several durability and path-fencing branches are platform-specific. Unit
+  # injection catches their logic, while this lane catches real filesystem,
+  # separator, permissions, and process behavior on a supported Windows host.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - run: npm ci
+      - name: Syntax check
+        shell: pwsh
+        run: |
+          Get-ChildItem src/*.js | ForEach-Object {
+            node --check $_.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Tests
+        run: npm test
 
   # The single stable context the "protect-main" ruleset requires. It exists so
   # the rule does not have to name matrix legs, which change whenever the
@@ -54,7 +85,7 @@ jobs:
   # instead of failing. Running always and exiting non-zero is what turns a
   # failed matrix into a failed "test" check.
   test:
-    needs: [unit]
+    needs: [unit, windows]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -63,4 +94,6 @@ jobs:
         # every leg succeeded, and 'failure'/'cancelled'/'skipped' otherwise.
         run: |
           echo "unit result: ${{ needs.unit.result }}"
+          echo "windows result: ${{ needs.windows.result }}"
           test "${{ needs.unit.result }}" = "success"
+          test "${{ needs.windows.result }}" = "success"

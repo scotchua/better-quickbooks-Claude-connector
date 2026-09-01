@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { mkdtemp, readFile, readdir, writeFile, rename, rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -25,7 +26,9 @@ const PROJECT_ROOT = path.join(import.meta.dirname, "..");
 const fixtures = [];
 async function authorize(slug, realmId, environment = "production") {
   const p = path.join(PROJECT_ROOT, `tokens.${slug}.json`);
-  await writeFile(p, JSON.stringify({ realmId, environment, access_token: "x", refresh_token: "y", expires_at: 0, refresh_expires_at: 0 }));
+  const tmp = `${p}.${process.pid}.${randomUUID()}.tmp`;
+  await writeFile(tmp, JSON.stringify({ realmId, environment, access_token: "x", refresh_token: "y", expires_at: 0, refresh_expires_at: 0 }));
+  await rename(tmp, p);
   fixtures.push(p);
 }
 afterEach(async () => {
@@ -61,17 +64,17 @@ describe("roster", () => {
 
 describe("resolveClient", () => {
   it("matches slug, exact alias, and partial name", async () => {
-    await authorize("zz-test-psa", "2222");
+    await authorize("zz-test-northwind", "2222");
     const { resolveClient, registerClient } = await import("../src/clients.js");
-    await registerClient("zz-test-psa", {
-      name: "Power Systems and Supplies of Alaska LLC",
-      aliases: ["PSSA", "Power Systems"],
+    await registerClient("zz-test-northwind", {
+      name: "Northwind Supply Cooperative LLC",
+      aliases: ["NSC", "Northwind Supply"],
     });
 
-    expect((await resolveClient("zz-test-psa")).match.slug).toBe("zz-test-psa");
-    expect((await resolveClient("pssa")).match.slug).toBe("zz-test-psa");
-    expect((await resolveClient("  Power   Systems ")).match.slug).toBe("zz-test-psa");
-    expect((await resolveClient("power systems and supplies of alaska llc")).match.slug).toBe("zz-test-psa");
+    expect((await resolveClient("zz-test-northwind")).match.slug).toBe("zz-test-northwind");
+    expect((await resolveClient("nsc")).match.slug).toBe("zz-test-northwind");
+    expect((await resolveClient("  Northwind   Supply ")).match.slug).toBe("zz-test-northwind");
+    expect((await resolveClient("northwind supply cooperative llc")).match.slug).toBe("zz-test-northwind");
   });
 
   it("returns candidates instead of guessing when a term is ambiguous", async () => {
@@ -124,5 +127,77 @@ describe("registerClient", () => {
     const r = await registerClient("zz-test-unauth", { name: "Pending Co" });
     expect(r.authorized).toBe(false);
     expect(r.warning).toMatch(/connect_company/);
+  });
+
+  it("serializes concurrent registrations without losing entries or sharing a temp file", async () => {
+    const { registerClient, loadClients } = await import("../src/clients.js");
+    const count = 24;
+    await Promise.all(Array.from({ length: count }, (_, index) =>
+      registerClient(`zz-test-concurrent-${index}`, {
+        name: `Concurrent Client ${index}`,
+        aliases: [`CC-${index}`],
+      })
+    ));
+
+    const clients = await loadClients();
+    for (let index = 0; index < count; index++) {
+      expect(clients[`zz-test-concurrent-${index}`]).toEqual({
+        name: `Concurrent Client ${index}`,
+        aliases: [`CC-${index}`],
+      });
+    }
+    expect(JSON.parse(await readFile(process.env.QBO_CLIENTS_FILE, "utf8")).clients)
+      .toEqual(clients);
+
+    const leftovers = (await readdir(dir)).filter((name) =>
+      name.endsWith(".tmp") || name.endsWith(".lock") || name.startsWith(".owner-lock-")
+    );
+    expect(leftovers).toEqual([]);
+  });
+
+  it("fsyncs a uniquely named temp and directory metadata on both sides of publication", async () => {
+    const { __test } = await import("../src/clients.js");
+    const events = [];
+    const fileHandle = {
+      writeFile: vi.fn(async () => { events.push("write"); }),
+      sync: vi.fn(async () => { events.push("file-sync"); }),
+      close: vi.fn(async () => { events.push("file-close"); }),
+    };
+    const directoryHandle = () => ({
+      sync: vi.fn(async () => { events.push("directory-sync"); }),
+      close: vi.fn(async () => { events.push("directory-close"); }),
+    });
+    const directoryHandles = [directoryHandle(), directoryHandle()];
+    const openFile = vi.fn(async (target, flags, mode) => {
+      events.push(`open:${target}:${flags}:${mode ?? ""}`);
+      return flags === "wx" ? fileHandle : directoryHandles.shift();
+    });
+    const move = vi.fn(async (from, to) => { events.push(`rename:${from}:${to}`); });
+    const remove = vi.fn();
+    const target = "/roster/clients.json";
+    const tmp = `${target}.${process.pid}.unique.tmp`;
+
+    await __test.durableAtomicReplace(target, "{}\n", {
+      openFile,
+      move,
+      remove,
+      platform: "linux",
+      token: () => "unique",
+    });
+
+    expect(events).toEqual([
+      `open:${tmp}:wx:384`,
+      "write",
+      "file-sync",
+      "file-close",
+      "open:/roster:r:",
+      "directory-sync",
+      "directory-close",
+      `rename:${tmp}:${target}`,
+      "open:/roster:r:",
+      "directory-sync",
+      "directory-close",
+    ]);
+    expect(remove).not.toHaveBeenCalled();
   });
 });

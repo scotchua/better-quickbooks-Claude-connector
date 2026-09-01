@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { isDestructiveOperation, isRealCalendarDate } from "../src/util.js";
+import os from "node:os";
+import path from "node:path";
+import { isDestructiveOperation, isRealCalendarDate, validateRawQboPath } from "../src/util.js";
 
 // This predicate is what holds the api_request escape hatch to the same rules
 // as the named delete_/void_ tools. A shape it fails to recognize is a delete
@@ -12,6 +14,8 @@ describe("isDestructiveOperation", () => {
     expect(isDestructiveOperation("/payment?operation=update&include=void")).toBe(true);
     expect(isDestructiveOperation("/salesreceipt?minorversion=75&operation=delete")).toBe(true);
     expect(isDestructiveOperation("/invoice?OPERATION=DELETE")).toBe(true);
+    expect(isDestructiveOperation("/invoice?operation=%64elete")).toBe(true);
+    expect(isDestructiveOperation("/payment?operation=update&include=%76oid")).toBe(true);
   });
   it("leaves ordinary writes and reads alone", () => {
     expect(isDestructiveOperation("/invoice")).toBe(false);
@@ -21,6 +25,24 @@ describe("isDestructiveOperation", () => {
     // a customer whose name merely contains the word
     expect(isDestructiveOperation("/query?query=SELECT * FROM Customer WHERE Name = 'Void Ltd'")).toBe(false);
     expect(isDestructiveOperation(undefined)).toBe(false);
+  });
+});
+
+describe("validateRawQboPath", () => {
+  it("accepts ordinary company-relative paths without rewriting the query", () => {
+    expect(validateRawQboPath("query?query=SELECT%20*%20FROM%20Bill")).toBe("/query?query=SELECT%20*%20FROM%20Bill");
+  });
+  it.each([
+    ["/invoice#hidden", /fragments/],
+    ["/invoice%23hidden", /fragments/],
+    ["//evil.example/invoice", /relative/],
+    ["/../invoice", /traversal/],
+    ["/invoice?requestid=chosen", /reserved/],
+    ["/invoice?%72equestid=chosen", /reserved/],
+    ["/invoice?minorversion=1", /reserved/],
+    ["/invoice?%6dinorversion=1", /reserved/],
+  ])("refuses unsafe raw path %s", (value, pattern) => {
+    expect(() => validateRawQboPath(value)).toThrow(pattern);
   });
 });
 import { esc, assertId, normalizeName, assertBalanced, guessContentType, expandHome } from "../src/util.js";
@@ -80,11 +102,18 @@ describe("guessContentType", () => {
 });
 
 describe("expandHome", () => {
-  it("expands a leading tilde", () => {
-    expect(expandHome("~/x.csv")).toBe(`${process.env.HOME}/x.csv`);
+  it("expands a bare tilde using the platform home directory", () => {
+    expect(expandHome("~")).toBe(os.homedir());
   });
-  it("leaves absolute paths alone", () => {
-    expect(expandHome("/tmp/x.csv")).toBe("/tmp/x.csv");
+  it("normalizes POSIX and Windows separators after a leading tilde", () => {
+    const expected = path.join(os.homedir(), "statements", "june.csv");
+    expect(expandHome("~/statements/june.csv")).toBe(expected);
+    expect(expandHome("~\\statements\\june.csv")).toBe(expected);
+  });
+  it("leaves paths without a standalone leading tilde alone", () => {
+    const absolute = path.resolve("tmp", "x.csv");
+    expect(expandHome(absolute)).toBe(absolute);
+    expect(expandHome("~another-user/x.csv")).toBe("~another-user/x.csv");
   });
 });
 

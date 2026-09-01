@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { deriveSlugFromRealm, sanitizeSlug, assertSlug } from "../src/qbo.js";
+import { afterEach, describe, it, expect, vi } from "vitest";
+import { deriveSlugFromRealm, sanitizeSlug, assertSlug, getCompanyInfoWithTokens } from "../src/qbo.js";
 import { compactList } from "../src/compact.js";
 
 describe("sanitizeSlug", () => {
@@ -40,27 +40,57 @@ describe("compactList", () => {
 });
 
 // sanitizeSlug is lenient because it guards a filename and must never throw.
-// assertSlug is the boundary version: silently rewriting "advance!" to
-// "advance" would let a typo resolve to a real company's books.
+// assertSlug is the boundary version: silently rewriting "northwind!" to
+// "northwind" would let a typo resolve to a real company's books.
 describe("assertSlug", () => {
   it("accepts slugs that survive sanitizing unchanged", () => {
-    expect(assertSlug("advance-welding")).toBe("advance-welding");
+    expect(assertSlug("northwind-supply")).toBe("northwind-supply");
     expect(assertSlug("mhpe_2026")).toBe("mhpe_2026");
     expect(assertSlug("  arrow  ")).toBe("arrow"); // surrounding space is not a typo
   });
 
   it("refuses anything that would be silently rewritten", () => {
-    expect(() => assertSlug("advance!")).toThrow(/not a valid company slug/);
-    expect(() => assertSlug("advance welding")).toThrow(/not a valid company slug/);
+    expect(() => assertSlug("northwind!")).toThrow(/not a valid company slug/);
+    expect(() => assertSlug("northwind supply")).toThrow(/not a valid company slug/);
     expect(() => assertSlug("../escape")).toThrow(/not a valid company slug/);
-    expect(() => assertSlug("arrow/../advance")).toThrow(/not a valid company slug/);
+    expect(() => assertSlug("arrow/../northwind")).toThrow(/not a valid company slug/);
   });
 
   it("suggests the sanitized form when there is one", () => {
-    expect(() => assertSlug("advance!")).toThrow(/Did you mean "advance"/);
+    expect(() => assertSlug("northwind!")).toThrow(/Did you mean "northwind"/);
   });
 
   it("still refuses input that sanitizes to nothing", () => {
     expect(() => assertSlug("!!!")).toThrow(/not a valid company slug/);
+  });
+});
+
+describe("fresh authorization verification", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("reads CompanyInfo with the fresh token before any on-disk selector is involved", async () => {
+    const fetchMock = vi.fn(async (_url, init) => new Response(JSON.stringify({
+      CompanyInfo: { CompanyName: "Verified Books", LegalName: "Verified Books LLC" },
+    }), { status: 200, headers: { intuit_tid: "tid-verify" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const info = await getCompanyInfoWithTokens({
+      access_token: "fresh-secret-token",
+      realmId: "123456789",
+      environment: "sandbox",
+    });
+    expect(info.CompanyName).toBe("Verified Books");
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/v3/company/123456789/companyinfo/123456789");
+    expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe("Bearer fresh-secret-token");
+  });
+
+  it("fails without persisting when the fresh realm cannot be verified", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      Fault: { Error: [{ Message: "AuthenticationFailed" }] },
+    }), { status: 401 })));
+    await expect(getCompanyInfoWithTokens({
+      access_token: "do-not-print-me",
+      realmId: "987654321",
+      environment: "production",
+    })).rejects.toThrow(/No canonical authorization was saved/);
   });
 });

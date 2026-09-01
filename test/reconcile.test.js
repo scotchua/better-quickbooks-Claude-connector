@@ -32,6 +32,24 @@ describe("matchTransactions", () => {
     const out = matchTransactions([{ date: "2026-07-01", amount: 10.0 }], [{ id: "z", date: "2026-07-01", amount: 10.02 }]);
     expect(out.matched).toHaveLength(0);
   });
+  it("reassigns an earlier match when that produces the maximum valid match count", () => {
+    const out = matchTransactions(
+      [
+        { row: 1, date: "2026-01-02", amount: 10 },
+        { row: 2, date: "2026-01-03", amount: 10 },
+      ],
+      [
+        { id: "jan1", date: "2026-01-01", amount: 10 },
+        { id: "jan2", date: "2026-01-02", amount: 10 },
+      ],
+      { toleranceDays: 1 }
+    );
+    expect(out.matched).toHaveLength(2);
+    expect(out.matched.map((m) => m.register.id)).toEqual(["jan1", "jan2"]);
+    expect(out.statement_only).toEqual([]);
+    expect(out.register_only).toEqual([]);
+    expect(out.matched.every((m) => m.ambiguous)).toBe(true);
+  });
 });
 
 describe("findDuplicateGroups", () => {

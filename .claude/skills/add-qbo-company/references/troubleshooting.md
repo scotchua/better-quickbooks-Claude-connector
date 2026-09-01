@@ -2,25 +2,28 @@
 
 Read this when a step in `SKILL.md` fails. Each entry is symptom → cause → fix.
 
-## "Token exchange failed" during `npm run connect`
+## "Token exchange failed" during authorization
 
 Almost always a mismatch between the app you're authorizing against and the keys
 in use.
 
-- **Production company, sandbox keys.** Sandbox `QBO_CLIENT_ID/SECRET` cannot
-  mint production tokens. Re-run with production keys and
-  `QBO_ENVIRONMENT=production` (see SKILL step 2).
-- **Redirect URI not registered.** The exact URI `http://localhost:3000/callback`
-  must be listed under the app's Redirect URIs in the Intuit developer portal —
-  and on the *same* app (sandbox vs production keys have separate redirect lists).
+- **Wrong app or environment.** Sandbox and production credentials are separate.
+  Sandbox uses `QBO_COMPANY=<slug> npm run connect`; production must use
+  `npm run connect:playground -- <slug>` or the configured HTTPS catcher. The
+  localhost command explicitly refuses production.
+- **Redirect URI not registered.** Sandbox localhost requires the exact
+  `http://localhost:3000/callback`. Production Playground requires
+  `https://developer.intuit.com/v2/OAuth2Playground/RedirectUrl`; the catcher
+  requires its configured HTTPS URL. Register the applicable URI on the same
+  app/environment whose keys are in `.env`.
 - **State mismatch — possible CSRF.** A stale browser tab replayed an old
   callback. Close all localhost:3000 tabs and re-run connect fresh.
 
 ## Browser didn't open
 
-`openBrowser` (`src/qbo.js`) shells out to `open`. If it's blocked, the command's
-stderr prints the full authorize URL — have the user paste it into a browser
-manually. Everything else is unchanged.
+The platform browser launcher may be blocked. The command's stderr prints the
+full authorize URL — have the user paste it into a browser manually. Everything
+else is unchanged.
 
 ## `EADDRINUSE` / port 3000 already in use
 
@@ -45,10 +48,13 @@ kill <pid>           # stop it, then re-run connect
 
 ## "Refresh token expired"
 
-Intuit refresh tokens expire after roughly 100 days of disuse (and carry a
-5-year maximum validity). Re-authorize that one company:
-`QBO_COMPANY=<slug> npm run connect`. No config change or restart needed; the
-token file is refreshed in place.
+Re-authorize that same company with the flow matching its environment:
+
+- sandbox: `QBO_COMPANY=<slug> npm run connect -- --replace-existing`
+- production: `npm run connect:playground -- <slug> --replace-existing` (or the
+  configured catcher with `--replace-existing`)
+
+No config change or restart is needed. Realm/environment mismatch is refused.
 
 ## Offboarding a client
 
@@ -58,9 +64,12 @@ the file.
 
 ## Wrong company's data appearing
 
-Two connectors point at the same `realmId`, or a token file was copied without
-re-authorizing. Run `list_companies.py`; if two slugs share a realmId, re-run
-connect for the one that's wrong so it captures the intended company.
+Two connectors may point at the same `realmId`, or a token file may have been
+copied. Run `list_companies.py`. Reauthorize a slug only when it should keep the
+same realm; use the matching replacement flag above. If the slug should point
+to a different company, authorize that company under a new slug first, verify
+it, then explicitly offboard the incorrect slug. The connector will not retarget
+an existing slug to another realm.
 
 ## Claude Desktop config got corrupted
 
