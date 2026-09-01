@@ -337,7 +337,10 @@ function parseLockMarker(raw, token, markerName, lockPath, operationLabel) {
   };
 }
 
-async function inspectLock(lockPath, operationLabel) {
+async function inspectLock(lockPath, operationLabel, {
+  platform = process.platform,
+  openMarkerFile = open,
+} = {}) {
   let directoryStat;
   try {
     directoryStat = await lstat(lockPath);
@@ -407,7 +410,7 @@ async function inspectLock(lockPath, operationLabel) {
         `lock marker ${entry.name} is not a small regular file`
       );
     }
-    handle = await open(markerPath, "r");
+    handle = await openMarkerFile(markerPath, "r");
     const openedStat = await handle.stat();
     if (!sameDirectory(markerStat, openedStat)) {
       throw malformedLockError(
@@ -427,6 +430,19 @@ async function inspectLock(lockPath, operationLabel) {
     };
   } catch (error) {
     if (error?.code === "ENOENT") return { kind: "changed" };
+    // Windows can report EPERM when an owner has unlinked its marker but the
+    // directory entry is still in the filesystem's delete-pending state. This
+    // observation is never authoritative: the caller may wait and inspect the
+    // complete lock again, but must not reclaim or remove anything because of
+    // it. A persistent EPERM is bounded by the normal acquisition deadline and
+    // ultimately fails closed with manual-cleanup guidance.
+    if (platform === "win32" && error?.code === "EPERM") {
+      return {
+        kind: "transient",
+        markerName: entry.name,
+        cause: error,
+      };
+    }
     if (error?.message?.startsWith(`Cannot safely use the ${operationLabel} lock`)) throw error;
     throw malformedLockError(
       lockPath,
@@ -634,10 +650,11 @@ function timeoutError(lockPath, operationLabel, timeoutMs, observed) {
  * Run `fn` while exclusively owning a cross-process directory lock.
  *
  * `now`, `wait`, `localHostname`, and `isProcessAlive` are injectable so the
- * timeout/liveness policy is deterministic in focused tests. `platform` and
- * `tokenFactory` are narrow portability/test hooks; production callers should
- * normally omit the entire options object. `afterEmptyLockIsolated` exists
- * only for deterministic failure injection around the quarantine boundary.
+ * timeout/liveness policy is deterministic in focused tests. `platform`,
+ * `tokenFactory`, and `openMarkerFile` are narrow portability/test hooks;
+ * production callers should normally omit the entire options object.
+ * `afterEmptyLockIsolated` exists only for deterministic failure injection
+ * around the quarantine boundary.
  */
 export async function withOwnerDirectoryLock(lockPath, operationLabel, fn, {
   timeoutMs = DEFAULT_TIMEOUT_MS,
@@ -648,13 +665,15 @@ export async function withOwnerDirectoryLock(lockPath, operationLabel, fn, {
   isProcessAlive = processIsAlive,
   platform = process.platform,
   tokenFactory = randomUUID,
+  openMarkerFile = open,
   afterEmptyLockIsolated = async () => {},
 } = {}) {
   if (typeof fn !== "function") throw new TypeError("Lock callback must be a function.");
   if (typeof now !== "function" || typeof wait !== "function" ||
       typeof isProcessAlive !== "function" || typeof tokenFactory !== "function" ||
+      typeof openMarkerFile !== "function" ||
       typeof afterEmptyLockIsolated !== "function") {
-    throw new TypeError("Lock timing, liveness, and token hooks must be functions.");
+    throw new TypeError("Lock timing, liveness, token, and marker-file hooks must be functions.");
   }
   const label = String(operationLabel ?? "operation").trim() || "operation";
   const timeout = positiveDuration(timeoutMs, "timeoutMs");
@@ -678,9 +697,24 @@ export async function withOwnerDirectoryLock(lockPath, operationLabel, fn, {
   for (;;) {
     if (await tryAcquire(lockPath, owner, { operationLabel: label, platform })) break;
 
-    const observed = await inspectLock(lockPath, label);
+    const observed = await inspectLock(lockPath, label, { platform, openMarkerFile });
     lastObserved = observed;
     if (["missing", "changed"].includes(observed.kind)) continue;
+    if (observed.kind === "transient") {
+      const currentTime = Number(now());
+      if (!Number.isFinite(currentTime)) throw new TypeError("now() must return a finite millisecond timestamp.");
+      if (currentTime >= deadline) {
+        throw malformedLockError(
+          lockPath,
+          label,
+          `lock marker ${observed.markerName} remained unreadable on Windows until the ${timeout}ms wait deadline ` +
+            `(${observed.cause?.code ?? "error"}: ${errorMessage(observed.cause)})`,
+          observed.cause
+        );
+      }
+      await wait(Math.max(1, Math.min(50, deadline - currentTime)));
+      continue;
+    }
 
     let reclaimed = false;
     if (observed.kind === "empty") {

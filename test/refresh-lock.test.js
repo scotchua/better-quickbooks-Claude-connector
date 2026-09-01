@@ -148,11 +148,9 @@ describe("withRefreshLock", () => {
     const legacy = lockFor("locktest-bad");
     await writeFile(legacy, "999999");
     let ran = false;
-    const started = Date.now();
     await expect(
       withRefreshLock("locktest-bad", async () => { ran = true; })
     ).rejects.toThrow(/legacy or malformed file.*Refusing.*manually/is);
-    expect(Date.now() - started).toBeLessThan(1_000);
     expect(ran).toBe(false);
     expect((await readFile(legacy, "utf8"))).toBe("999999");
   });

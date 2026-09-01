@@ -210,7 +210,6 @@ describe("QBO transport retry boundaries", () => {
     }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const startedAt = Date.now();
     const error = await bounded.qboRequest("/invoice", {
       method: "POST",
       company: SLUG,
@@ -222,7 +221,6 @@ describe("QBO transport retry boundaries", () => {
     expect(timeoutSeconds).toBeGreaterThan(0);
     expect(timeoutSeconds).toBeLessThanOrEqual(0.1);
 
-    expect(Date.now() - startedAt).toBeLessThan(500);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 

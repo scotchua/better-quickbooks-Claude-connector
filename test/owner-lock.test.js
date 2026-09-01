@@ -4,6 +4,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   rm,
@@ -171,6 +172,99 @@ describe("withOwnerDirectoryLock", () => {
     })).rejects.toThrow(/Timed out.*another-host\.example/is);
 
     expect(isProcessAlive).not.toHaveBeenCalled();
+    await expect(stat(marker)).resolves.toBeTruthy();
+  });
+
+  it("retries a transient Windows EPERM without treating it as ownership evidence", async () => {
+    const firstEntered = deferred();
+    const releaseFirst = deferred();
+    const sawTransient = deferred();
+    const order = [];
+    const first = withOwnerDirectoryLock(lockPath, "first operation", async () => {
+      order.push("first-enter");
+      firstEntered.resolve();
+      await releaseFirst.promise;
+      order.push("first-exit");
+      return "first-result";
+    });
+    await firstEntered.promise;
+
+    let attempts = 0;
+    const openMarkerFile = vi.fn(async (...args) => {
+      attempts += 1;
+      if (attempts === 1) {
+        const error = new Error("marker is delete-pending");
+        error.code = "EPERM";
+        sawTransient.resolve();
+        throw error;
+      }
+      return open(...args);
+    });
+    const second = withOwnerDirectoryLock(lockPath, "second operation", async () => {
+      order.push("second-enter");
+      order.push("second-exit");
+      return "second-result";
+    }, {
+      platform: "win32",
+      timeoutMs: 2_000,
+      openMarkerFile,
+    });
+
+    await sawTransient.promise;
+    try {
+      expect(order).toEqual(["first-enter"]);
+      expect(await readdir(lockPath)).toHaveLength(1);
+    } finally {
+      releaseFirst.resolve();
+    }
+    await expect(Promise.all([first, second])).resolves.toEqual(["first-result", "second-result"]);
+
+    expect(order).toEqual(["first-enter", "first-exit", "second-enter", "second-exit"]);
+    expect(openMarkerFile).toHaveBeenCalled();
+    await expect(lstat(lockPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("fails closed when a Windows owner marker remains unreadable through the deadline", async () => {
+    const marker = await createOwnedLock(lockPath, { pid: process.pid });
+    let clock = 0;
+    let entered = false;
+    const openMarkerFile = vi.fn(async () => {
+      const error = new Error("persistent marker denial");
+      error.code = "EPERM";
+      throw error;
+    });
+
+    await expect(withOwnerDirectoryLock(lockPath, "test operation", async () => {
+      entered = true;
+    }, {
+      platform: "win32",
+      timeoutMs: 20,
+      now: () => clock,
+      wait: async (ms) => { clock += ms; },
+      openMarkerFile,
+    })).rejects.toThrow(/remained unreadable on Windows.*EPERM.*Refusing.*manually/is);
+
+    expect(entered).toBe(false);
+    expect(openMarkerFile).toHaveBeenCalledTimes(2);
+    await expect(stat(marker)).resolves.toBeTruthy();
+  });
+
+  it("does not reinterpret owner-marker permission errors as transient off Windows", async () => {
+    const marker = await createOwnedLock(lockPath, { pid: process.pid });
+    const wait = vi.fn();
+    const openMarkerFile = vi.fn(async () => {
+      const error = new Error("permission denied");
+      error.code = "EPERM";
+      throw error;
+    });
+
+    await expect(withOwnerDirectoryLock(lockPath, "test operation", async () => "not-entered", {
+      platform: "linux",
+      wait,
+      openMarkerFile,
+    })).rejects.toThrow(/lock marker .* cannot be read.*permission denied.*Refusing/is);
+
+    expect(wait).not.toHaveBeenCalled();
     await expect(stat(marker)).resolves.toBeTruthy();
   });
 
