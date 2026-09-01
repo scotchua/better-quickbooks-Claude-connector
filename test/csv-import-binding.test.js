@@ -6,14 +6,14 @@ import { mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SLUG = "csv-preview-binding-test";
 const TOKEN_FILE = path.join(ROOT, `tokens.${SLUG}.json`);
 
 function startServer(preload, tempDir, categoryFile, writeLog) {
-  const child = spawn(process.execPath, ["--import", preload, "src/index.js"], {
+  const child = spawn(process.execPath, ["--import", pathToFileURL(preload).href, "src/index.js"], {
     cwd: ROOT,
     env: {
       ...process.env,

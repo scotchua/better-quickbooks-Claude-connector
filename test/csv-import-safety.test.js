@@ -4,14 +4,16 @@ import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promise
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SLUG = "csv-import-safety-test";
 const TOKEN_FILE = path.join(ROOT, `tokens.${SLUG}.json`);
 
 function startServer(preload, { auditDir, policyFile, modeFile, countFile, writeLog, filesDir }) {
-  const child = spawn(process.execPath, ["--import", preload, "src/index.js"], {
+  // Node's ESM loader treats a bare Windows absolute path (C:\\...) as a URL
+  // with an unsupported `c:` scheme. A file URL is portable on every platform.
+  const child = spawn(process.execPath, ["--import", pathToFileURL(preload).href, "src/index.js"], {
     cwd: ROOT,
     env: {
       ...process.env,
