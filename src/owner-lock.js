@@ -70,6 +70,18 @@ function malformedLockError(lockPath, operationLabel, detail, cause) {
   );
 }
 
+function windowsTransientObservation(platform, error, subject) {
+  // Windows may briefly deny stat/scandir/open while an unlinked lock path is
+  // still delete-pending. This result never authorizes cleanup: callers may
+  // only wait and re-inspect the entire lock until the existing deadline.
+  if (platform !== "win32" || error?.code !== "EPERM") return null;
+  return {
+    kind: "transient",
+    subject,
+    cause: error,
+  };
+}
+
 function sameDirectory(first, second) {
   // dev+ino is the stable identity on normal local filesystems, including the
   // filesystems supported by Node on Windows. birthtime is a fail-closed
@@ -339,13 +351,17 @@ function parseLockMarker(raw, token, markerName, lockPath, operationLabel) {
 
 async function inspectLock(lockPath, operationLabel, {
   platform = process.platform,
+  inspectPath = lstat,
+  readLockDirectory = readdir,
   openMarkerFile = open,
 } = {}) {
   let directoryStat;
   try {
-    directoryStat = await lstat(lockPath);
+    directoryStat = await inspectPath(lockPath);
   } catch (error) {
     if (error?.code === "ENOENT") return { kind: "missing" };
+    const transient = windowsTransientObservation(platform, error, "the lock pathname");
+    if (transient) return transient;
     throw malformedLockError(
       lockPath,
       operationLabel,
@@ -367,9 +383,11 @@ async function inspectLock(lockPath, operationLabel, {
 
   let entries;
   try {
-    entries = await readdir(lockPath, { withFileTypes: true });
+    entries = await readLockDirectory(lockPath, { withFileTypes: true });
   } catch (error) {
     if (error?.code === "ENOENT") return { kind: "missing" };
+    const transient = windowsTransientObservation(platform, error, "the lock directory");
+    if (transient) return transient;
     throw malformedLockError(
       lockPath,
       operationLabel,
@@ -402,7 +420,7 @@ async function inspectLock(lockPath, operationLabel, {
   let markerStat;
   let handle;
   try {
-    markerStat = await lstat(markerPath);
+    markerStat = await inspectPath(markerPath);
     if (!markerStat.isFile() || markerStat.size > MAX_MARKER_BYTES) {
       throw malformedLockError(
         lockPath,
@@ -430,19 +448,8 @@ async function inspectLock(lockPath, operationLabel, {
     };
   } catch (error) {
     if (error?.code === "ENOENT") return { kind: "changed" };
-    // Windows can report EPERM when an owner has unlinked its marker but the
-    // directory entry is still in the filesystem's delete-pending state. This
-    // observation is never authoritative: the caller may wait and inspect the
-    // complete lock again, but must not reclaim or remove anything because of
-    // it. A persistent EPERM is bounded by the normal acquisition deadline and
-    // ultimately fails closed with manual-cleanup guidance.
-    if (platform === "win32" && error?.code === "EPERM") {
-      return {
-        kind: "transient",
-        markerName: entry.name,
-        cause: error,
-      };
-    }
+    const transient = windowsTransientObservation(platform, error, `lock marker ${entry.name}`);
+    if (transient) return transient;
     if (error?.message?.startsWith(`Cannot safely use the ${operationLabel} lock`)) throw error;
     throw malformedLockError(
       lockPath,
@@ -651,8 +658,9 @@ function timeoutError(lockPath, operationLabel, timeoutMs, observed) {
  *
  * `now`, `wait`, `localHostname`, and `isProcessAlive` are injectable so the
  * timeout/liveness policy is deterministic in focused tests. `platform`,
- * `tokenFactory`, and `openMarkerFile` are narrow portability/test hooks;
- * production callers should normally omit the entire options object.
+ * `tokenFactory`, `inspectPath`, `readLockDirectory`, and `openMarkerFile` are
+ * narrow portability/test hooks; production callers should normally omit the
+ * entire options object.
  * `afterEmptyLockIsolated` exists only for deterministic failure injection
  * around the quarantine boundary.
  */
@@ -665,15 +673,18 @@ export async function withOwnerDirectoryLock(lockPath, operationLabel, fn, {
   isProcessAlive = processIsAlive,
   platform = process.platform,
   tokenFactory = randomUUID,
+  inspectPath = lstat,
+  readLockDirectory = readdir,
   openMarkerFile = open,
   afterEmptyLockIsolated = async () => {},
 } = {}) {
   if (typeof fn !== "function") throw new TypeError("Lock callback must be a function.");
   if (typeof now !== "function" || typeof wait !== "function" ||
       typeof isProcessAlive !== "function" || typeof tokenFactory !== "function" ||
+      typeof inspectPath !== "function" || typeof readLockDirectory !== "function" ||
       typeof openMarkerFile !== "function" ||
       typeof afterEmptyLockIsolated !== "function") {
-    throw new TypeError("Lock timing, liveness, token, and marker-file hooks must be functions.");
+    throw new TypeError("Lock timing, liveness, token, and filesystem-inspection hooks must be functions.");
   }
   const label = String(operationLabel ?? "operation").trim() || "operation";
   const timeout = positiveDuration(timeoutMs, "timeoutMs");
@@ -697,7 +708,12 @@ export async function withOwnerDirectoryLock(lockPath, operationLabel, fn, {
   for (;;) {
     if (await tryAcquire(lockPath, owner, { operationLabel: label, platform })) break;
 
-    const observed = await inspectLock(lockPath, label, { platform, openMarkerFile });
+    const observed = await inspectLock(lockPath, label, {
+      platform,
+      inspectPath,
+      readLockDirectory,
+      openMarkerFile,
+    });
     lastObserved = observed;
     if (["missing", "changed"].includes(observed.kind)) continue;
     if (observed.kind === "transient") {
@@ -707,7 +723,7 @@ export async function withOwnerDirectoryLock(lockPath, operationLabel, fn, {
         throw malformedLockError(
           lockPath,
           label,
-          `lock marker ${observed.markerName} remained unreadable on Windows until the ${timeout}ms wait deadline ` +
+          `${observed.subject} remained unreadable on Windows until the ${timeout}ms wait deadline ` +
             `(${observed.cause?.code ?? "error"}: ${errorMessage(observed.cause)})`,
           observed.cause
         );

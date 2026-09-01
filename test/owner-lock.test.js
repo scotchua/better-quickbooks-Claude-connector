@@ -175,7 +175,15 @@ describe("withOwnerDirectoryLock", () => {
     await expect(stat(marker)).resolves.toBeTruthy();
   });
 
-  it("retries a transient Windows EPERM without treating it as ownership evidence", async () => {
+  it.each([
+    ["lock-path stat", "inspectPath", lstat],
+    ["lock-directory read", "readLockDirectory", readdir],
+    ["owner-marker open", "openMarkerFile", open],
+  ])("retries a transient Windows EPERM from %s without treating it as ownership evidence", async (
+    _source,
+    hookName,
+    realOperation
+  ) => {
     const firstEntered = deferred();
     const releaseFirst = deferred();
     const sawTransient = deferred();
@@ -190,7 +198,7 @@ describe("withOwnerDirectoryLock", () => {
     await firstEntered.promise;
 
     let attempts = 0;
-    const openMarkerFile = vi.fn(async (...args) => {
+    const inspectionHook = vi.fn(async (...args) => {
       attempts += 1;
       if (attempts === 1) {
         const error = new Error("marker is delete-pending");
@@ -207,7 +215,7 @@ describe("withOwnerDirectoryLock", () => {
     }, {
       platform: "win32",
       timeoutMs: 2_000,
-      openMarkerFile,
+      [hookName]: inspectionHook,
     });
 
     await sawTransient.promise;
@@ -220,7 +228,7 @@ describe("withOwnerDirectoryLock", () => {
     await expect(Promise.all([first, second])).resolves.toEqual(["first-result", "second-result"]);
 
     expect(order).toEqual(["first-enter", "first-exit", "second-enter", "second-exit"]);
-    expect(openMarkerFile).toHaveBeenCalled();
+    expect(inspectionHook).toHaveBeenCalled();
     await expect(lstat(lockPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
