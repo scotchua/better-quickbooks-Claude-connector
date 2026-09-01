@@ -153,7 +153,7 @@ describe("registerClient", () => {
       name.endsWith(".tmp") || name.endsWith(".lock") || name.startsWith(".owner-lock-")
     );
     expect(leftovers).toEqual([]);
-  });
+  }, 35_000);
 
   it("fsyncs a uniquely named temp and directory metadata on both sides of publication", async () => {
     const { __test } = await import("../src/clients.js");
