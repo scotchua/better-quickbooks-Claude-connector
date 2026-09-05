@@ -100,15 +100,18 @@ network calls.
 
 ## Step 6: Connect your companies
 
-**Real production books:** localhost OAuth is not accepted by Intuit. Claude
-runs `npm run connect:playground -- <slug>` for each company (or the optional
-HTTPS catcher documented in `README.md`). You choose the app/company in
-Intuit's OAuth Playground and paste back the Realm ID and refresh token through
-hidden terminal input. The app's **Production** Keys & OAuth page must contain
-`https://developer.intuit.com/v2/OAuth2Playground/RedirectUrl` exactly.
+**Ratified onboarding path:** Claude runs `npm run connect:catcher -- <roster-slug>`
+for each company, using the exact slug already assigned in the roster. The
+hosted HTTPS catcher is documented in `docs/oauth-catcher/README.md`.
 
-**Sandbox test books:** Claude can use the localhost browser flow, including
-`npm run connect:batch` for several companies.
+**Sandbox test books:** `connect:batch` is only a convenience for authorizing a
+pre-planned group of sandbox companies in one browser session. It is not the
+ratified onboarding path and never derives slugs. Pass each roster slug in the
+same order you will select the companies:
+
+```bash
+npm run connect:batch -- --slug acme --slug northwind
+```
 
 For a sandbox batch, Claude starts the connection flow and gives you a link
 (your browser usually opens on its own).

@@ -44,9 +44,9 @@ QBO_COMPANY=<slug> npm run connect      # writes tokens.<slug>.json
 # Or a single default company:
 npm run connect                          # writes tokens.json
 
-# Or add several in one browser session (log in once, pick + Allow each):
-npm run connect:batch                    # interactive
-npm run connect:batch -- --count 50      # fixed number
+# Or add several sandbox companies in one browser session. Give every company
+# its exact roster slug, in the same order you will select them:
+npm run connect:batch -- --slug acme --slug northwind
 ```
 A browser opens → log in to the QuickBooks company → **Allow**. Tokens are saved
 locally and refresh automatically until Intuit reports that reauthorization is required.

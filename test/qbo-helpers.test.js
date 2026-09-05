@@ -1,5 +1,5 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
-import { deriveSlugFromRealm, sanitizeSlug, assertSlug, getCompanyInfoWithTokens } from "../src/qbo.js";
+import { requireBatchSlug, requireBatchSlugs, sanitizeSlug, assertSlug, getCompanyInfoWithTokens } from "../src/qbo.js";
 import { compactList } from "../src/compact.js";
 
 describe("sanitizeSlug", () => {
@@ -10,13 +10,23 @@ describe("sanitizeSlug", () => {
   });
 });
 
-describe("deriveSlugFromRealm", () => {
-  it("uses the last four digits and extends on collision", () => {
-    expect(deriveSlugFromRealm("9999999999123456")).toBe("3456");
-    expect(deriveSlugFromRealm("9999999999123456", new Set(["3456"]))).toBe("23456");
+describe("connect:batch roster slugs", () => {
+  it("requires explicit roster slugs for names that cannot be safely normalized", () => {
+    const cases = [
+      { companyInfo: { CompanyName: "O'Brien & Sons" }, slug: "obrien-sons", assigned: new Set() },
+      { companyInfo: { CompanyName: "Northwind Supply, LLC" }, slug: "northwind", assigned: new Set() },
+      { companyInfo: { CompanyName: "acme!" }, slug: "acme-west", assigned: new Set(["acme"]) },
+    ];
+
+    for (const { companyInfo, slug, assigned } of cases) {
+      expect(() => requireBatchSlug(undefined, companyInfo, assigned)).toThrow(/--slug.*refuses to derive/i);
+      expect(requireBatchSlug(slug, companyInfo, assigned)).toBe(slug);
+    }
   });
-  it("falls back sensibly for degenerate realm ids", () => {
-    expect(deriveSlugFromRealm("12")).toBe("12");
+
+  it("rejects missing and duplicate batch slug arguments", () => {
+    expect(() => requireBatchSlugs()).toThrow(/requires one repeated --slug/i);
+    expect(() => requireBatchSlugs(["acme", "acme"])).toThrow(/assigned more than once/i);
   });
 });
 

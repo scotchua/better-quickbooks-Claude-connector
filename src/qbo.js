@@ -2661,15 +2661,34 @@ async function disconnectCompany(slug) {
   });
 }
 
-// Derive a short, stable, filesystem-safe slug from a realmId: the last 4 digits,
-// extended one digit at a time until it no longer collides with a taken slug.
-function deriveSlugFromRealm(realmId, taken = new Set()) {
-  const digits = String(realmId).replace(/\D/g, "");
-  for (let n = 4; n <= digits.length; n++) {
-    const s = digits.slice(-n);
-    if (!taken.has(s)) return s;
+// Batch must use the roster's identity, just like the catcher path. Company
+// names are display data: normalizing punctuation or legal suffixes here can
+// silently collide two clients, while realm suffixes are not roster slugs.
+function requireBatchSlug(slug, companyInfo, assigned = new Set()) {
+  const companyName = companyInfo?.CompanyName ?? companyInfo?.LegalName ?? "this company";
+  if (slug == null || String(slug).trim() === "") {
+    throw new Error(
+      `No --slug was provided for "${companyName}". connect:batch refuses to derive company slugs; ` +
+      "pass the exact roster slug for each company."
+    );
   }
-  return digits || sanitizeSlug(String(realmId)) || "company";
+  const clean = assertSlug(slug);
+  if (assigned.has(clean)) {
+    throw new Error(`Batch slug "${clean}" is assigned more than once. Pass one unique roster slug per company.`);
+  }
+  return clean;
+}
+
+function requireBatchSlugs(slugs) {
+  if (!Array.isArray(slugs) || slugs.length === 0) {
+    throw new Error("connect:batch requires one repeated --slug <roster-slug> value per company.");
+  }
+  const assigned = new Set();
+  return slugs.map((slug) => {
+    const clean = requireBatchSlug(slug, null, assigned);
+    assigned.add(clean);
+    return clean;
+  });
 }
 
 // Exchange an authorization code for a token bundle (no realmId — that comes from
@@ -2709,13 +2728,13 @@ async function exchangeCodeForTokens(code, environment) {
 
 // Pattern A — sequential batch authorization on ONE persistent localhost listener.
 // The Intuit login session is reused across companies, so after the first login
-// each additional company is just pick-in-the-picker → Allow. `shouldContinue`
-// (async, receives the list connected so far) decides whether to authorize
-// another; return false to stop. A company whose realmId is already on disk is
-// refreshed in place under its existing slug instead of creating a duplicate.
+// each additional company is just pick-in-the-picker → Allow. `slugs` contains
+// the roster slug for each company, in picker order. A company already on disk
+// under that slug and realm is refreshed in place instead of duplicated.
 // The whole batch uses one environment (QBO_ENVIRONMENT); run separate batches
 // for sandbox vs production. Returns [{ slug, realmId, environment, reused }].
-async function runBatchAuthorization({ shouldContinue } = {}) {
+async function runBatchAuthorization({ slugs } = {}) {
+  const requestedSlugs = requireBatchSlugs(slugs);
   const environment = connectEnvironment();
   if (environment === "production") {
     throw new Error(
@@ -2742,7 +2761,7 @@ async function runBatchAuthorization({ shouldContinue } = {}) {
     res.writeHead(200, { "Content-Type": "text/html" }).end(
       `<html><body style="font-family:sans-serif;padding:3rem;text-align:center">
          <h2>✅ Connected (#${connected.length + 1})</h2>
-         <p>Return to your terminal — it will prompt for the next company or finish.</p>
+         <p>Return to your terminal — the next roster company will open, or the batch will finish.</p>
        </body></html>`
     );
     const p = pending; pending = null;
@@ -2757,15 +2776,15 @@ async function runBatchAuthorization({ shouldContinue } = {}) {
   log(`Batch authorize listening on ${creds.redirectUri} (${environment}).`);
 
   try {
-    let go = true;
-    while (go) {
+    while (connected.length < requestedSlugs.length) {
+      const requestedSlug = requestedSlugs[connected.length];
       const state = randomBytes(16).toString("hex");
       const authUrl =
         `${AUTHORIZE_URL}?client_id=${encodeURIComponent(creds.clientId)}` +
         `&response_type=code&scope=${encodeURIComponent(SCOPE)}` +
         `&redirect_uri=${encodeURIComponent(creds.redirectUri)}&state=${state}`;
 
-      log(`\n[#${connected.length + 1}] Opening browser — pick the next company and click Allow.`);
+      log(`\n[#${connected.length + 1}] Opening browser — pick roster company "${requestedSlug}" and click Allow.`);
       log("If it doesn't open, use this URL:");
       log("AUTHORIZE_URL>>> " + authUrl + " <<<");
 
@@ -2777,26 +2796,35 @@ async function runBatchAuthorization({ shouldContinue } = {}) {
       const tokens = { ...(await exchangeCodeForTokens(code, environment)), realmId };
       const companyInfo = await getCompanyInfoWithTokens(tokens);
 
-      // Reuse the existing slug if this realmId is already connected; else mint one.
       const existing = await listCompanies();
-      const taken = new Set(existing.map((c) => c.slug).concat(connected.map((c) => c.slug)));
-      const already = existing.find((c) => String(c.realmId) === String(realmId));
-      const slug = already ? already.slug : deriveSlugFromRealm(realmId, taken);
+      const slug = requireBatchSlug(requestedSlug, companyInfo, new Set(connected.map((c) => c.slug)));
+      const atSlug = existing.find((c) => c.slug === slug);
+      const atRealm = existing.find((c) => String(c.realmId) === String(realmId));
+      if (atSlug && String(atSlug.realmId) !== String(realmId)) {
+        throw new Error(
+          `Roster slug "${slug}" is already authorized to realm ${atSlug.realmId}, but Intuit returned realm ${realmId}. ` +
+          "Refusing to replace a different company."
+        );
+      }
+      if (atRealm && atRealm.slug !== slug) {
+        throw new Error(
+          `The selected company is already authorized as "${atRealm.slug}", not roster slug "${slug}". ` +
+          "Refusing to create a second slug for the same company."
+        );
+      }
 
-      await persistAuthorization(slug, tokens, { replaceExisting: !!already });
+      await persistAuthorization(slug, tokens, { replaceExisting: !!atSlug });
       connected.push({
         slug,
         realmId,
         environment: tokens.environment,
-        reused: !!already,
+        reused: !!atSlug,
         company_name: companyInfo.CompanyName ?? null,
       });
       log(
-        `   → "${slug}"${already ? " (already existed — refreshed)" : ""} · ` +
+        `   → "${slug}"${atSlug ? " (already existed — refreshed)" : ""} · ` +
         `${companyInfo.CompanyName ?? `realm ${realmId}`} · ${tokens.environment}`
       );
-
-      go = shouldContinue ? await shouldContinue(connected.slice()) : false;
     }
   } finally {
     server.close();
@@ -2837,7 +2865,8 @@ export {
   beginAuthorization,
   authorizationStatus,
   cancelAuthorization,
-  deriveSlugFromRealm,
+  requireBatchSlug,
+  requireBatchSlugs,
   listCompanies,
   assertRealmNotAlreadyAuthorized,
   sanitizeSlug,

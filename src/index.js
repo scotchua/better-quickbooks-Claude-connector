@@ -41,7 +41,7 @@ import {
   beginAuthorization,
   authorizationStatus,
   cancelAuthorization,
-  deriveSlugFromRealm,
+  requireBatchSlugs,
   listCompanies,
   sanitizeSlug,
   assertSlug,
@@ -184,9 +184,8 @@ if (process.argv.includes("--connect-playground")) {
 }
 
 // ---- Pattern A: sequential batch authorization ----------------------------
-// `npm run connect:batch`            → keep going, asking "add another?" after each
-// `npm run connect:batch -- --count 50` → authorize exactly 50, no prompts
-// `npm run connect:batch -- --dry`   → print the plan and exit (no browser)
+// `npm run connect:batch -- --slug acme --slug northwind` → authorize in that order
+// `npm run connect:batch -- --slug acme --dry`             → print the plan and exit
 if (process.argv.includes("--connect-batch")) {
   const argv = process.argv;
   const getArg = (name) => {
@@ -198,40 +197,33 @@ if (process.argv.includes("--connect-batch")) {
   const hasCount = Number.isFinite(count) && count > 0;
 
   try {
+    const rawSlugs = [];
+    for (let i = 0; i < argv.length; i++) {
+      if (argv[i] !== "--slug") continue;
+      const value = argv[i + 1];
+      if (!value || value.startsWith("--")) {
+        throw new Error("Each --slug must be followed by a roster slug.");
+      }
+      rawSlugs.push(value);
+    }
+    const slugs = requireBatchSlugs(rawSlugs);
+    if (hasCount && count !== slugs.length) {
+      throw new Error(`--count ${count} requires exactly ${count} repeated --slug values; received ${slugs.length}.`);
+    }
+
     if (dry) {
       const existing = await listCompanies();
-      const taken = new Set(existing.map((c) => c.slug));
       log("Batch plan (dry run — nothing authorized):");
       log(`  environment : ${(process.env.QBO_ENVIRONMENT || "sandbox").toLowerCase()}`);
       log(`  redirect    : ${process.env.QBO_REDIRECT_URI || "http://localhost:3000/callback"}`);
-      log(`  mode        : ${hasCount ? `fixed count = ${count}` : "interactive (asks 'add another?')"}`);
+      log(`  roster slugs: ${slugs.join(", ")}`);
       log(`  already connected (${existing.length}): ${existing.map((c) => `${c.slug}(${c.environment})`).join(", ") || "none"}`);
-      log(`  example new slug for realm 9999999999123456 → "${deriveSlugFromRealm("9999999999123456", taken)}"`);
       process.exit(0);
     }
 
-    // Decide whether to authorize another company after each success.
-    let shouldContinue;
-    if (hasCount) {
-      shouldContinue = (connected) => connected.length < count;
-    } else {
-      const rl = (await import("node:readline/promises")).createInterface({
-        input: process.stdin,
-        output: process.stderr,
-      });
-      shouldContinue = async () => {
-        const answer = (await rl.question("Connect another company? [y/N] ")).trim().toLowerCase();
-        const yes = answer === "y" || answer === "yes";
-        if (!yes) rl.close();
-        return yes;
-      };
-    }
+    log(`Batch authorizing ${slugs.length} companies. Select them in roster order: ${slugs.join(", ")}.`);
 
-    log(hasCount
-      ? `Batch authorizing ${count} companies. Log in once, then pick + Allow each.`
-      : "Batch authorize started. Log in once; after each company you'll be asked to add another.");
-
-    const connected = await runBatchAuthorization({ shouldContinue });
+    const connected = await runBatchAuthorization({ slugs });
 
     log(`\nDone — ${connected.length} compan${connected.length === 1 ? "y" : "ies"} authorized:`);
     for (const c of connected) {

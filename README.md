@@ -384,11 +384,11 @@ Your web browser opens. Log in to the QuickBooks company and click **Allow**.
 When you see "✅ QuickBooks connected," close that browser tab. Repeat this step
 for each company you want to add (use a different nickname each time).
 
-**Adding many companies at once?** Use the batch tool — log in once, then just
-pick + Allow each company. **Same command on Mac and Windows:**
+**Adding many sandbox companies at once?** Use the batch tool with the exact
+roster slug for every company, in the order you will select them. It never
+derives slugs. **Same command on Mac and Windows:**
 ```bash
-npm run connect:batch                 # keeps asking "add another?"
-npm run connect:batch -- --count 50   # or do a set number in a row
+npm run connect:batch -- --slug acme --slug northwind
 ```
 
 **Step 7 — Tell Claude Desktop about the app (once, ever).**
