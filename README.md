@@ -490,6 +490,17 @@ environment and returned realm still match the slug already on disk.
 > **Developers:** technical setup, the full tool list, and architecture live in
 > **[DEVELOPER.md](DEVELOPER.md)**.
 
+## Known limitations of the QuickBooks API
+
+- The API exposes no merge mechanism for name-list records. (P21, 2026-09-03; `p21-2026-09-03.json`)
+- Updating an existing account's `AccountType` is accepted but silently ignored. (P17, 2026-09-02; `p17-2026-09-02.json`)
+- Deactivating an account or customer renames it with a `(deleted)` suffix; reactivation restores the name. (P3, 2026-08-05, and P8, 2026-08-07; `p3-2026-08-05.json`, `p8-2026-08-07.json`)
+- Preferences are field-specific: `CustomerTerminology` and `ClassTrackingPerTxn` write and reverse, while `UseAccountNumbers`, `TrackDepartments`, and `FirstMonthOfFiscalYear` are accepted but silently ignored. (P18 follow-up bisect, 2026-09-03; `review/SUITE-AUDIT-2026-09-04.md`)
+- A report can return HTTP 200 for an `as_of` request while reporting a different period, and CDC silently limits history to about 30 days even when an older `changedSince` is accepted. (2026-08-30 `docs/audits/review-service-audit-2026-08-30.md`; 2026-08-26 `measurements/history_check-2026-08-26.json`)
+- An incomplete `Line` array in an otherwise valid sparse transaction update replaces the complete array and deletes omitted lines. (P9, 2026-08-23; `p9-2026-08-23.json`)
+- Void behavior has been measured only for invoices. (P20, 2026-09-02; `p20-2026-09-02.json`)
+- Full `TxnDate` updates worked across all six tested transaction classes, while sparse-update support varied by class. (P19, 2026-09-03; `p19-2026-09-03.json`)
+
 ## Help & support
 
 Stuck on a step or seeing an error? Tell Claude (Code or Desktop) exactly what

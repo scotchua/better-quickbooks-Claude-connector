@@ -9,6 +9,9 @@ This repository is the generic, local connector: Apache-2.0, free to fork, with
 no hosted MHPE service or paid tier. Keep firm-specific methodology, prompts,
 and engagement procedures in a separate private skills layer.
 
+QuickBooks behavior verified by sandbox probes and read-only measurements is
+summarized in [Known limitations of the QuickBooks API](README.md#known-limitations-of-the-quickbooks-api).
+
 The server exposes generic MCP context rather than embedding that methodology:
 `qbo://companies`, `qbo://clients`, `qbo://policy`, and
 `qbo://company/{slug}/context`, plus profile-gated prompts for month-end, close
