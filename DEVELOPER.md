@@ -166,9 +166,12 @@ report them and support migration to the unified entry.
 
 ## Tool catalog (full profile)
 
+As measured on 2026-09-04 by `node scripts/tool-count.js`, the full profile
+exposes 118 tools. The script asks the running MCP server for `tools/list` and
+prints the sorted names so this catalog can be regenerated.
+
 The MCP `tools/list` response and `src/tool-profiles.js` are authoritative. This
-functional overview intentionally avoids a total that would drift whenever a
-tool is added or moved between profiles.
+functional overview groups that measured surface by purpose.
 
 Recent additions include: get_preferences, get_aged_receivables_detail,
 get_aged_payables_detail, get_profit_and_loss_detail, get_inventory_valuation,

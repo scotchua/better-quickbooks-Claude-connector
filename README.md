@@ -36,13 +36,16 @@ work rather than a single-business dashboard:
   reconciliation, side-by-side multi-company reporting, diagnostics, and a safe
   bulk CSV import. The task-sized default `core` profile keeps the everyday
   reporting, AR/AP, banking, close-review, journal, and explicit-export surface
-  at 61 tools, and
-  carries every tool the six workflow prompts require so none of them is
+  focused, and carries every tool the six workflow prompts require so none is
   silently hidden; `accountant` opts into the broad professional surface. Both
   hide OAuth administration, raw API escape hatches, permanent deletion, and
   write-policy editing. Sandbox authorization is
   available in chat under the `admin` profile; real companies use Intuit's
   hosted OAuth Playground or the optional self-hosted HTTPS catcher flow.
+
+As measured on 2026-09-04 by `node scripts/tool-count.js`, the full profile
+exposes 118 tools. The script asks the running MCP server for `tools/list` and
+prints the sorted names so the documentation can be regenerated.
 
 You do **not** need to know how to code. The setup below is copy-and-paste.
 

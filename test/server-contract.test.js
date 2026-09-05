@@ -17,6 +17,7 @@ import { KNOWN_TOOL_NAMES } from "../src/tool-profiles.js";
 import Ajv2020 from "ajv/dist/2020.js";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+const FULL_TOOL_COUNT = 118;
 
 // Minimal JSON-RPC-over-stdio client: enough to initialize and list.
 function startServer(env = {}) {
@@ -102,6 +103,7 @@ describe("MCP server contract", () => {
   const byName = (n) => tools.find((t) => t.name === n);
 
   it("registers the full tool surface", () => {
+    expect(tools).toHaveLength(FULL_TOOL_COUNT);
     expect(tools.map((tool) => tool.name).sort()).toEqual([...KNOWN_TOOL_NAMES].sort());
   });
 
@@ -134,8 +136,11 @@ describe("MCP server contract", () => {
     }
   });
 
-  it("gives every tool a title, description, and input schema", () => {
-    const missing = tools.filter((t) => !t.title || !t.description || !t.inputSchema);
+  it("gives every tool a title, non-empty description, and input schema", () => {
+    const missing = tools.filter((t) =>
+      !t.title || typeof t.description !== "string" || !t.description.trim()
+      || !t.inputSchema || t.inputSchema.type !== "object"
+    );
     expect(missing.map((t) => t.name)).toEqual([]);
   });
 
