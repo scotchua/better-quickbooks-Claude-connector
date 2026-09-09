@@ -2,13 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { qboRequest, saveTokens, __test } from "../src/qbo.js";
 
-const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SLUG = "transport-retry-test";
-const TOKEN_FILE = path.join(ROOT, `tokens.${SLUG}.json`);
-const REFRESH_LOCK = path.join(ROOT, `.refresh-${SLUG}.lock`);
+const TOKEN_FILE = path.join(process.env.QBO_TOKENS_DIR, `tokens.${SLUG}.json`);
+const REFRESH_LOCK = path.join(process.env.QBO_TOKENS_DIR, `.refresh-${SLUG}.lock`);
 let auditDir;
 
 const jsonResponse = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), {

@@ -1,18 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFile, rm, stat } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { disconnectCompany, getValidTokens, importRefreshToken, recoverStagedTokenImport, saveTokens } from "../src/qbo.js";
 import { decryptTokens } from "../src/secure-store.js";
 
-const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SLUG = "token-stage-test";
 const REALM = "910000000000333";
-const canonical = path.join(ROOT, `tokens.${SLUG}.json`);
-const stage = path.join(ROOT, `.qbo-token-stage-${SLUG}.json`);
-const lock = path.join(ROOT, `.refresh-${SLUG}.lock`);
-const refreshRecovery = path.join(ROOT, `.qbo-refresh-recovery-${SLUG}.json`);
-const disconnectRecovery = path.join(ROOT, `.qbo-disconnect-recovery-${SLUG}.json`);
+const canonical = path.join(process.env.QBO_TOKENS_DIR, `tokens.${SLUG}.json`);
+const stage = path.join(process.env.QBO_TOKENS_DIR, `.qbo-token-stage-${SLUG}.json`);
+const lock = path.join(process.env.QBO_TOKENS_DIR, `.refresh-${SLUG}.lock`);
+const refreshRecovery = path.join(process.env.QBO_TOKENS_DIR, `.qbo-refresh-recovery-${SLUG}.json`);
+const disconnectRecovery = path.join(process.env.QBO_TOKENS_DIR, `.qbo-disconnect-recovery-${SLUG}.json`);
 
 async function cleanup() {
   await Promise.all([canonical, stage, lock, refreshRecovery, disconnectRecovery]

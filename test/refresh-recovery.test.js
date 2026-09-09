@@ -12,17 +12,17 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SLUG = "refresh-recovery-test";
 const OTHER_SLUG = "refresh-recovery-other";
 const REALM = "910000000000772";
-const TOKEN_FILE = path.join(ROOT, `tokens.${SLUG}.json`);
-const RECOVERY_FILE = path.join(ROOT, `.qbo-refresh-recovery-${SLUG}.json`);
-const DISCONNECT_FILE = path.join(ROOT, `.qbo-disconnect-recovery-${SLUG}.json`);
-const STAGE_FILE = path.join(ROOT, `.qbo-token-stage-${SLUG}.json`);
-const LOCK_FILE = path.join(ROOT, `.refresh-${SLUG}.lock`);
+const TOKEN_FILE = path.join(process.env.QBO_TOKENS_DIR, `tokens.${SLUG}.json`);
+const RECOVERY_FILE = path.join(process.env.QBO_TOKENS_DIR, `.qbo-refresh-recovery-${SLUG}.json`);
+const DISCONNECT_FILE = path.join(process.env.QBO_TOKENS_DIR, `.qbo-disconnect-recovery-${SLUG}.json`);
+const STAGE_FILE = path.join(process.env.QBO_TOKENS_DIR, `.qbo-token-stage-${SLUG}.json`);
+const LOCK_FILE = path.join(process.env.QBO_TOKENS_DIR, `.refresh-${SLUG}.lock`);
 const REALM_LOCK = path.join(
-  ROOT,
+  process.env.QBO_TOKENS_DIR,
   `.realm-authorization-${createHash("sha256").update(REALM).digest("hex").slice(0, 32)}.lock`
 );
-const OTHER_TOKEN_FILE = path.join(ROOT, `tokens.${OTHER_SLUG}.json`);
-const OTHER_LOCK_FILE = path.join(ROOT, `.refresh-${OTHER_SLUG}.lock`);
+const OTHER_TOKEN_FILE = path.join(process.env.QBO_TOKENS_DIR, `tokens.${OTHER_SLUG}.json`);
+const OTHER_LOCK_FILE = path.join(process.env.QBO_TOKENS_DIR, `.refresh-${OTHER_SLUG}.lock`);
 const KEY = "84".repeat(32);
 
 function originalTokens() {

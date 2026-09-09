@@ -10,8 +10,7 @@
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID, createHash } from "node:crypto";
-import { readFile, readdir, rename, unlink, open } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
+import { readFile, rename, unlink, open } from "node:fs/promises";
 import path from "node:path";
 import { encryptionEnabled, encryptTokens, decryptTokens, isEncrypted } from "./secure-store.js";
 import {
@@ -30,9 +29,7 @@ import { checkWritePolicy } from "./policy.js";
 import { isAmbiguousHttpStatus, isRealCalendarDate, readResponseBuffer, validateRawQboPath } from "./util.js";
 import { listAuthorizedCompanies, listAuthorizationIdentities } from "./company-registry.js";
 import { withOwnerDirectoryLock } from "./owner-lock.js";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.join(__dirname, "..");
+import { tokensDir } from "./token-directory.js";
 
 const AUTHORIZE_URL = "https://appcenter.intuit.com/connect/oauth2";
 const TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer";
@@ -232,7 +229,7 @@ configureQboRuntime(process.env);
 
 function tokensPathFor(slug) {
   const clean = sanitizeSlug(slug);
-  return path.join(ROOT, clean ? `tokens.${clean}.json` : "tokens.json");
+  return path.join(tokensDir(), clean ? `tokens.${clean}.json` : "tokens.json");
 }
 
 // A Playground refresh can return new token state. Keep the freshly returned
@@ -241,7 +238,7 @@ function tokensPathFor(slug) {
 // listCompanies()' tokens.<slug>.json pattern.
 function tokenStagePathFor(slug) {
   const clean = sanitizeSlug(slug) || "default";
-  return path.join(ROOT, `.qbo-token-stage-${clean}.json`);
+  return path.join(tokensDir(), `.qbo-token-stage-${clean}.json`);
 }
 
 // Normal refreshes use a separate encrypted recovery journal from Playground
@@ -250,7 +247,7 @@ function tokenStagePathFor(slug) {
 // mistaken for a safe retry on the next process start.
 function refreshRecoveryPathFor(slug) {
   const clean = sanitizeSlug(slug) || "default";
-  return path.join(ROOT, `.qbo-refresh-recovery-${clean}.json`);
+  return path.join(tokensDir(), `.qbo-refresh-recovery-${clean}.json`);
 }
 
 // A partial disconnect also needs a durable, non-credential receipt so a
@@ -259,7 +256,7 @@ function refreshRecoveryPathFor(slug) {
 // connector already has a token-storage key and this is authorization state.
 function disconnectRecoveryPathFor(slug) {
   const clean = sanitizeSlug(slug) || "default";
-  return path.join(ROOT, `.qbo-disconnect-recovery-${clean}.json`);
+  return path.join(tokensDir(), `.qbo-disconnect-recovery-${clean}.json`);
 }
 
 // Credentials + redirect come from the environment. Intuit issues SEPARATE
@@ -983,8 +980,12 @@ export function chooseRefreshSource(onDisk, existing, force = false, now = Date.
 // tool call) can each exchange a token the other just invalidated, and the
 // company drops offline until someone re-authorizes. An owner-marker lock
 // directory is the part that crosses process boundaries.
+function refreshLockPathFor(slug) {
+  return path.join(tokensDir(), `.refresh-${sanitizeSlug(slug) || "default"}.lock`);
+}
+
 async function withRefreshLock(slug, fn) {
-  const lockPath = path.join(ROOT, `.refresh-${sanitizeSlug(slug) || "default"}.lock`);
+  const lockPath = refreshLockPathFor(slug);
   return withOwnerDirectoryLock(lockPath, "token refresh", fn, {
     staleAfterMs: Math.max(5 * 60_000, TIMEOUT_MS * 2 + 30_000),
   });
@@ -996,7 +997,7 @@ function realmAuthorizationLockPath(realmId) {
   // Hash the opaque realm value so an unexpected value can never become a
   // pathname and so lock filenames disclose no company identifier.
   const key = createHash("sha256").update(identity).digest("hex").slice(0, 32);
-  return path.join(ROOT, `.realm-authorization-${key}.lock`);
+  return path.join(tokensDir(), `.realm-authorization-${key}.lock`);
 }
 
 async function withRealmAuthorizationLock(realmId, fn) {
@@ -2804,6 +2805,10 @@ async function runBatchAuthorization({ shouldContinue } = {}) {
 }
 
 const __test = {
+  tokensPathFor,
+  tokenStagePathFor,
+  refreshLockPathFor,
+  realmAuthorizationLockPath,
   refreshTokensWithStorageForTest,
   refreshRecoveryPathFor,
   disconnectRecoveryPathFor,

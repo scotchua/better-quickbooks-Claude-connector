@@ -19,13 +19,11 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-// listCompanies reads tokens.<slug>.json from the project root, so fixtures go
-// there and are cleaned up after. Plaintext is fine; only realmId and
-// environment are read for the roster join.
-const PROJECT_ROOT = path.join(import.meta.dirname, "..");
+// Plaintext fixtures are fine; only realmId and environment are read for
+// the roster join.
 const fixtures = [];
 async function authorize(slug, realmId, environment = "production") {
-  const p = path.join(PROJECT_ROOT, `tokens.${slug}.json`);
+  const p = path.join(process.env.QBO_TOKENS_DIR, `tokens.${slug}.json`);
   const tmp = `${p}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(tmp, JSON.stringify({ realmId, environment, access_token: "x", refresh_token: "y", expires_at: 0, refresh_expires_at: 0 }));
   await rename(tmp, p);

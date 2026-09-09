@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SLUG = "csv-preview-binding-test";
-const TOKEN_FILE = path.join(ROOT, `tokens.${SLUG}.json`);
+const TOKEN_FILE = path.join(process.env.QBO_TOKENS_DIR, `tokens.${SLUG}.json`);
 
 function startServer(preload, tempDir, categoryFile, writeLog) {
   const child = spawn(process.execPath, ["--import", pathToFileURL(preload).href, "src/index.js"], {

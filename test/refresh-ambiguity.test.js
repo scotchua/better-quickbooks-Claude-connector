@@ -10,9 +10,9 @@ import { getValidTokens, refreshTokens, saveTokens } from "../src/qbo.js";
 const execFileP = promisify(execFile);
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SLUG = "refresh-ambiguity-test";
-const TOKEN_FILE = path.join(ROOT, `tokens.${SLUG}.json`);
-const LOCK_FILE = path.join(ROOT, `.refresh-${SLUG}.lock`);
-const RECOVERY_FILE = path.join(ROOT, `.qbo-refresh-recovery-${SLUG}.json`);
+const TOKEN_FILE = path.join(process.env.QBO_TOKENS_DIR, `tokens.${SLUG}.json`);
+const LOCK_FILE = path.join(process.env.QBO_TOKENS_DIR, `.refresh-${SLUG}.lock`);
+const RECOVERY_FILE = path.join(process.env.QBO_TOKENS_DIR, `.qbo-refresh-recovery-${SLUG}.json`);
 const KEY = "73".repeat(32);
 
 function expiredTokens(overrides = {}) {
