@@ -71,8 +71,8 @@ function malformedLockError(lockPath, operationLabel, detail, cause) {
 }
 
 function windowsTransientObservation(platform, error, subject) {
-  // Windows may briefly deny stat/scandir/open while an unlinked lock path is
-  // still delete-pending. This result never authorizes cleanup: callers may
+  // Windows may briefly deny mkdir/stat/scandir/open while an unlinked lock
+  // path is still delete-pending. This result never authorizes cleanup: callers may
   // only wait and re-inspect the entire lock until the existing deadline.
   if (platform !== "win32" || error?.code !== "EPERM") return null;
   return {
@@ -259,11 +259,14 @@ async function cleanupFailedAcquisition(lockPath, markerState, {
 async function tryAcquire(lockPath, owner, {
   operationLabel,
   platform,
+  createLockDirectory = mkdir,
 } = {}) {
   try {
-    await mkdir(lockPath, { mode: 0o700 });
+    await createLockDirectory(lockPath, { mode: 0o700 });
   } catch (error) {
     if (error?.code === "EEXIST") return false;
+    const transient = windowsTransientObservation(platform, error, "the lock pathname (mkdir)");
+    if (transient) return transient;
     throw new Error(`Cannot create the ${operationLabel} lock directory ${lockPath} (${errorMessage(error)}).`, {
       cause: error,
     });
@@ -658,9 +661,9 @@ function timeoutError(lockPath, operationLabel, timeoutMs, observed) {
  *
  * `now`, `wait`, `localHostname`, and `isProcessAlive` are injectable so the
  * timeout/liveness policy is deterministic in focused tests. `platform`,
- * `tokenFactory`, `inspectPath`, `readLockDirectory`, and `openMarkerFile` are
- * narrow portability/test hooks; production callers should normally omit the
- * entire options object.
+ * `tokenFactory`, `inspectPath`, `readLockDirectory`, `openMarkerFile`, and
+ * `createLockDirectory` are narrow portability/test hooks; production callers
+ * should normally omit the entire options object.
  * `afterEmptyLockIsolated` exists only for deterministic failure injection
  * around the quarantine boundary.
  */
@@ -676,13 +679,14 @@ export async function withOwnerDirectoryLock(lockPath, operationLabel, fn, {
   inspectPath = lstat,
   readLockDirectory = readdir,
   openMarkerFile = open,
+  createLockDirectory = mkdir,
   afterEmptyLockIsolated = async () => {},
 } = {}) {
   if (typeof fn !== "function") throw new TypeError("Lock callback must be a function.");
   if (typeof now !== "function" || typeof wait !== "function" ||
       typeof isProcessAlive !== "function" || typeof tokenFactory !== "function" ||
       typeof inspectPath !== "function" || typeof readLockDirectory !== "function" ||
-      typeof openMarkerFile !== "function" ||
+      typeof openMarkerFile !== "function" || typeof createLockDirectory !== "function" ||
       typeof afterEmptyLockIsolated !== "function") {
     throw new TypeError("Lock timing, liveness, token, and filesystem-inspection hooks must be functions.");
   }
@@ -706,9 +710,10 @@ export async function withOwnerDirectoryLock(lockPath, operationLabel, fn, {
 
   let lastObserved;
   for (;;) {
-    if (await tryAcquire(lockPath, owner, { operationLabel: label, platform })) break;
+    const acquisition = await tryAcquire(lockPath, owner, { operationLabel: label, platform, createLockDirectory });
+    if (acquisition === true) break;
 
-    const observed = await inspectLock(lockPath, label, {
+    const observed = acquisition || await inspectLock(lockPath, label, {
       platform,
       inspectPath,
       readLockDirectory,
