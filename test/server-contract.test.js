@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { KNOWN_TOOL_NAMES } from "../src/tool-profiles.js";
+import Ajv2020 from "ajv/dist/2020.js";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -251,6 +252,21 @@ describe("MCP server contract", () => {
     for (const n of ["list_companies", "health_check", "resolve_client", "get_preferences", "get_transaction_links", "list_unresolved_writes"]) {
       expect(byName(n).outputSchema, n).toBeTruthy();
     }
+  });
+
+  it.each([["full", 10], ["", 9]])("publishes compilable 2020-12 output schemas for profile %s", async (profile, count) => {
+    const listed = profile === "full" ? tools : await listTools({ QBO_TOOL_PROFILE: profile });
+    const declared = listed.filter((tool) => Object.hasOwn(tool, "outputSchema"));
+    expect(declared).toHaveLength(count);
+    const ajv = new Ajv2020();
+    for (const tool of declared) {
+      expect(tool.outputSchema.$schema, tool.name).toBe("https://json-schema.org/draft/2020-12/schema");
+      expect(() => ajv.compile(tool.outputSchema), tool.name).not.toThrow();
+    }
+    const validate = ajv.compile(declared.find((tool) => tool.name === "list_clients").outputSchema);
+    expect(validate({ count: 0, clients: [] })).toBe(true);
+    expect(validate({ clients: [] })).toBe(false);
+    expect(validate({ count: "0", clients: [] })).toBe(false);
   });
 
   it("returns MCP structuredContent while preserving the text fallback", async () => {

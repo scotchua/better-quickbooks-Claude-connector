@@ -39,6 +39,7 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "ajv": "8.20.0",
     "vitest": "^4.1.11"
   },
   "license": "Apache-2.0"

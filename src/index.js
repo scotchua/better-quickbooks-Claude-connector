@@ -104,6 +104,7 @@ import { extractLinks, summarizeTxn, describeChain, READABLE_TXN_TYPES } from ".
 import { checkWritePolicy, policyFor, setCompanyPolicy, policyPath, writeAmount } from "./policy.js";
 import { roster, resolveClient, registerClient, clientsPath } from "./clients.js";
 import { shouldRegisterTool, toolProfileFromEnv } from "./tool-profiles.js";
+import { installOutputSchemaDialect } from "./output-schema.js";
 
 // Static ESM dependencies (including qbo.js) evaluate before this module's
 // dotenv call above. Re-apply the now-complete environment before any command
@@ -4920,6 +4921,7 @@ registerWorkflowPrompt(
 );
 
 // ---- start -----------------------------------------------------------------
+await installOutputSchemaDialect(server, [...registeredToolNames].filter((name) => OUTPUT_SCHEMAS.has(name)));
 const transport = new StdioServerTransport();
 await server.connect(transport);
 log(
