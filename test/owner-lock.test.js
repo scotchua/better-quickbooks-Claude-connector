@@ -175,6 +175,141 @@ describe("withOwnerDirectoryLock", () => {
     await expect(stat(marker)).resolves.toBeTruthy();
   });
 
+  it("retries transient Windows mkdir EPERM until acquisition succeeds", async () => {
+    let clock = 0;
+    const failure = Object.assign(new Error("lock is delete-pending"), { code: "EPERM" });
+    const createLockDirectory = vi.fn(mkdir)
+      .mockRejectedValueOnce(failure)
+      .mockRejectedValueOnce(failure);
+    const wait = vi.fn(async (ms) => { clock += ms; });
+    const callback = vi.fn(async () => "acquired");
+
+    await expect(withOwnerDirectoryLock(lockPath, "test operation", callback, {
+      platform: "win32",
+      timeoutMs: 125,
+      now: () => clock,
+      wait,
+      createLockDirectory,
+    })).resolves.toBe("acquired");
+
+    expect(createLockDirectory).toHaveBeenCalledTimes(3);
+    expect(createLockDirectory).toHaveBeenLastCalledWith(lockPath, { mode: 0o700 });
+    expect(wait.mock.calls).toEqual([[50], [50]]);
+    expect(callback).toHaveBeenCalledTimes(1);
+    await expect(lstat(lockPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it.each([false, true])("bounds persistent Windows mkdir EPERM by the deadline (existing owner: %s)", async (existingOwner) => {
+    const marker = existingOwner ? await createOwnedLock(lockPath, { pid: process.pid }) : null;
+    let clock = 1_000;
+    const failure = Object.assign(new Error("persistent mkdir denial"), { code: "EPERM" });
+    const createLockDirectory = vi.fn().mockRejectedValue(failure);
+    const wait = vi.fn(async (ms) => { clock += ms; });
+    const callback = vi.fn();
+
+    const thrown = await withOwnerDirectoryLock(lockPath, "test operation", callback, {
+      platform: "win32",
+      timeoutMs: 125,
+      now: () => clock,
+      wait,
+      createLockDirectory,
+    }).catch((error) => error);
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown.message).toContain(lockPath);
+    expect(thrown.message).toMatch(/125ms wait deadline.*EPERM.*persistent mkdir denial/is);
+    expect(thrown.cause).toBe(failure);
+    expect(clock).toBe(1_125);
+    expect(wait.mock.calls).toEqual([[50], [50], [25]]);
+    expect(createLockDirectory).toHaveBeenCalledTimes(4);
+    expect(callback).not.toHaveBeenCalled();
+    if (marker) await expect(stat(marker)).resolves.toBeTruthy();
+    else await expect(lstat(lockPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it.each([
+    ["linux", "EPERM"],
+    ["darwin", "EPERM"],
+    ...["win32", "linux", "darwin"].flatMap((platform) =>
+      ["EACCES", "EIO", "ENOENT"].map((code) => [platform, code])
+    ),
+  ])("immediately rejects mkdir %s %s with the original message and cause", async (platform, code) => {
+    const failure = Object.assign(new Error("mkdir failed"), { code });
+    const createLockDirectory = vi.fn().mockRejectedValue(failure);
+    const wait = vi.fn();
+    const callback = vi.fn();
+
+    const thrown = await withOwnerDirectoryLock(lockPath, "test operation", callback, {
+      platform,
+      now: () => 0,
+      wait,
+      createLockDirectory,
+    }).catch((error) => error);
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown.message).toBe(`Cannot create the test operation lock directory ${lockPath} (mkdir failed).`);
+    expect(thrown.cause).toBe(failure);
+    expect(createLockDirectory).toHaveBeenCalledTimes(1);
+    expect(wait).not.toHaveBeenCalled();
+    expect(callback).not.toHaveBeenCalled();
+  });
+
+  it.each(["win32", "linux", "darwin"])("preserves mkdir EEXIST contention handling on %s", async (platform) => {
+    const marker = await createOwnedLock(lockPath, { pid: process.pid });
+    let clock = 0;
+    const createLockDirectory = vi.fn(mkdir);
+    const wait = vi.fn(async (ms) => { clock += ms; });
+    const isProcessAlive = vi.fn(() => true);
+    const callback = vi.fn();
+
+    await expect(withOwnerDirectoryLock(lockPath, "test operation", callback, {
+      platform,
+      timeoutMs: 20,
+      now: () => clock,
+      wait,
+      createLockDirectory,
+      isProcessAlive,
+    })).rejects.toThrow(/Timed out.*held by process/is);
+
+    expect(createLockDirectory).toHaveBeenCalledTimes(2);
+    expect(wait.mock.calls).toEqual([[20]]);
+    expect(isProcessAlive).toHaveBeenCalledWith(process.pid);
+    expect(callback).not.toHaveBeenCalled();
+    await expect(stat(marker)).resolves.toBeTruthy();
+  });
+
+  it("inspects a competing owner after transient Windows mkdir EPERM becomes EEXIST", async () => {
+    const marker = await createOwnedLock(lockPath, { pid: process.pid });
+    let clock = 0;
+    const failure = Object.assign(new Error("lock is delete-pending"), { code: "EPERM" });
+    const createLockDirectory = vi.fn(mkdir).mockRejectedValueOnce(failure);
+    const isProcessAlive = vi.fn(() => true);
+    const callback = vi.fn();
+
+    await expect(withOwnerDirectoryLock(lockPath, "test operation", callback, {
+      platform: "win32",
+      timeoutMs: 125,
+      now: () => clock,
+      wait: async (ms) => { clock += ms; },
+      createLockDirectory,
+      isProcessAlive,
+    })).rejects.toThrow(/Timed out.*held by process/is);
+
+    expect(clock).toBe(125);
+    expect(createLockDirectory).toHaveBeenCalledTimes(4);
+    expect(isProcessAlive).toHaveBeenCalledTimes(3);
+    expect(isProcessAlive).toHaveBeenCalledWith(process.pid);
+    expect(callback).not.toHaveBeenCalled();
+    await expect(stat(marker)).resolves.toBeTruthy();
+  });
+
+  it("validates the lock-directory creation hook before acquisition", async () => {
+    await expect(withOwnerDirectoryLock(lockPath, "test operation", async () => {}, {
+      createLockDirectory: null,
+    })).rejects.toThrow("Lock timing, liveness, token, and filesystem-inspection hooks must be functions.");
+    await expect(lstat(lockPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it.each([
     ["lock-path stat", "inspectPath", lstat],
     ["lock-directory read", "readLockDirectory", readdir],
