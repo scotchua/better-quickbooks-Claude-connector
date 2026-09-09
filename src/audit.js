@@ -25,7 +25,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { withOwnerDirectoryLock } from "./owner-lock.js";
-import { isAmbiguousHttpStatus } from "./util.js";
+import { isAmbiguousHttpStatus, resolveEnvPath } from "./util.js";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -70,8 +70,8 @@ export function claimRecoveryRequestId(explicitRequestId) {
   return supplied;
 }
 
-function auditDir() {
-  return process.env.QBO_AUDIT_DIR || path.join(ROOT, "audit-log");
+export function auditDir(env = process.env) {
+  return resolveEnvPath(env.QBO_AUDIT_DIR, path.join(ROOT, "audit-log"));
 }
 
 export function auditMode() {

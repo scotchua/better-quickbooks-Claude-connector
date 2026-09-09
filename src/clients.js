@@ -20,15 +20,15 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { listCompanies, sanitizeSlug } from "./qbo.js";
-import { normalizeName } from "./util.js";
+import { normalizeName, resolveEnvPath } from "./util.js";
 import { withOwnerDirectoryLock } from "./owner-lock.js";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CLIENTS_LOCK_TIMEOUT_MS = 30_000;
 const CLIENTS_LOCK_STALE_MS = 5 * 60_000;
 
-export function clientsPath() {
-  return process.env.QBO_CLIENTS_FILE || path.join(ROOT, "clients.json");
+export function clientsPath(env = process.env) {
+  return resolveEnvPath(env.QBO_CLIENTS_FILE, path.join(ROOT, "clients.json"));
 }
 
 async function loadClientDocument(p) {

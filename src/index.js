@@ -47,7 +47,7 @@ import {
   assertSlug,
   configureQboRuntime,
 } from "./qbo.js";
-import { todayISO, esc, assertId, guessContentType, readResponseBuffer, resolveUserPath, isDestructiveOperation, isRealCalendarDate, validateRawQboPath } from "./util.js";
+import { todayISO, esc, assertId, guessContentType, readResponseBuffer, resolveEnvPath, resolveUserPath, isDestructiveOperation, isRealCalendarDate, validateRawQboPath } from "./util.js";
 import { record as auditRecord, toolContext, listUnresolvedWrites } from "./audit.js";
 import {
   QUERY_PAGE_SIZE,
@@ -3727,10 +3727,10 @@ registerTool(
 
 const EXPORTS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "exports");
 
-function defaultExportPath(company, name) {
+export function defaultExportPath(company, name) {
   const base = process.env.QBO_FILES_DIR
-    ? path.join(process.env.QBO_FILES_DIR, "exports")
-    : EXPORTS_DIR;
+    ? path.join(resolveEnvPath(process.env.QBO_FILES_DIR), "exports")
+    : resolveEnvPath(undefined, EXPORTS_DIR);
   return path.join(base, company || "default", name);
 }
 
