@@ -90,8 +90,10 @@ describe("token directory enumeration", () => {
     expect(result.error).toBeUndefined();
     const { results } = JSON.parse(result.stdout);
     expect(results.find((row) => row.check === "Company authorizations")).toMatchObject({
-      status: "ok",
-      detail: "2 token file(s) found and structurally valid with private permissions.",
+      status: process.platform === "win32" ? "warn" : "ok",
+      detail: process.platform === "win32"
+        ? "2 token file(s) found; permissions are too broad on: tokens.acme.json, tokens.json."
+        : "2 token file(s) found and structurally valid with private permissions.",
     });
     expect(results.find((row) => row.check === "OAuth recovery state")).toMatchObject({
       status: "warn",
