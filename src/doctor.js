@@ -9,10 +9,11 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
-import { validatePolicy } from "./policy.js";
+import { policyPath, validatePolicy } from "./policy.js";
+import { auditDir as resolveAuditDir } from "./audit.js";
 import { toolProfileFromEnv } from "./tool-profiles.js";
 import { duplicateRealms } from "./company-registry.js";
-import { expandHome } from "./util.js";
+import { resolveEnvPath } from "./util.js";
 import { tokensDir } from "./token-directory.js";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -37,6 +38,8 @@ try {
 }
 
 const env = { ...fileEnv, ...Object.fromEntries(Object.entries(process.env).filter(([, value]) => value !== "")) };
+// Registry diagnostics read process.env just like the runtime.
+dotenv.populate(process.env, env, { override: true });
 
 const nodeMajor = Number(process.versions.node.split(".")[0]);
 if (nodeMajor >= 22) add("ok", "Node.js", `Version ${process.versions.node}.`);
@@ -68,7 +71,7 @@ try {
   add("error", "Tool profile", e.message);
 }
 
-const filesBase = env.QBO_FILES_DIR ? path.resolve(expandHome(env.QBO_FILES_DIR)) : null;
+const filesBase = env.QBO_FILES_DIR ? resolveEnvPath(env.QBO_FILES_DIR) : null;
 if (!filesBase) {
   add("error", "QBO_FILES_DIR", "No local-files fence is configured. Imports, reconciliation, reports, and downloads will be refused.", "Set QBO_FILES_DIR to the root of the firm's client-file tree.");
 } else {
@@ -82,8 +85,12 @@ if (!filesBase) {
   }
 }
 
+const tokenDirectory = tokensDir(env);
+add("info", "QBO_TOKENS_DIR", `Using ${tokenDirectory}.`);
+add("info", "QBO_CLIENTS_FILE", `Using ${resolveEnvPath(env.QBO_CLIENTS_FILE, path.join(ROOT, "clients.json"))}.`);
+
 try {
-  const names = await readdir(tokensDir());
+  const names = await readdir(tokenDirectory);
   const tokenNames = names.filter((name) => /^tokens(?:\.[A-Za-z0-9_-]+)?\.json$/.test(name));
   if (!tokenNames.length) {
     add("warn", "Company authorizations", "No token files were found.", "Connect a sandbox with connect_company/admin profile, or run the documented production Playground flow.");
@@ -91,7 +98,7 @@ try {
     const loose = [];
     const invalid = [];
     for (const name of tokenNames) {
-      const tokenPath = path.join(tokensDir(), name);
+      const tokenPath = path.join(tokenDirectory, name);
       const mode = (await stat(tokenPath)).mode & 0o777;
       if (mode & 0o077) loose.push(name);
       try {
@@ -127,7 +134,7 @@ try {
 // not look like company token files. Report only counts (never realm ids or
 // slug-bearing filenames) so diagnostics cannot leak client identifiers.
 try {
-  const names = await readdir(tokensDir());
+  const names = await readdir(tokenDirectory);
   const refreshRecoveryCount = names.filter((name) => /^\.qbo-refresh-recovery-[A-Za-z0-9_-]+\.json$/.test(name)).length;
   const disconnectRecoveryCount = names.filter((name) => /^\.qbo-disconnect-recovery-[A-Za-z0-9_-]+\.json$/.test(name)).length;
   const playgroundStageCount = names.filter((name) => /^\.qbo-token-stage-[A-Za-z0-9_-]+\.json$/.test(name)).length;
@@ -179,7 +186,7 @@ try {
   add("error", "Company identity", `Cannot check for duplicate realms (${e.message}).`);
 }
 
-const configuredPolicyPath = path.resolve(expandHome(env.QBO_POLICY_FILE || path.join(ROOT, "qbo-policy.json")));
+const configuredPolicyPath = policyPath(env);
 try {
   const raw = (await readFile(configuredPolicyPath, "utf8")).trim();
   validatePolicy(raw ? JSON.parse(raw) : {}, configuredPolicyPath);
@@ -192,7 +199,7 @@ try {
   }
 }
 
-const auditDir = path.resolve(expandHome(env.QBO_AUDIT_DIR || path.join(ROOT, "audit-log")));
+const auditDir = resolveAuditDir(env);
 try {
   const info = await stat(auditDir);
   if (!info.isDirectory()) throw new Error("path exists but is not a directory");

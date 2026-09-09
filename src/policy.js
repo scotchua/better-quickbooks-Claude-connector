@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { realmSiblingSlugs } from "./company-registry.js";
 import { withOwnerDirectoryLock } from "./owner-lock.js";
+import { resolveEnvPath } from "./util.js";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cache = { path: null, identity: null, policy: null };
@@ -205,8 +206,8 @@ export function validatePolicy(policy, label = "write-policy file") {
   return policy;
 }
 
-export function policyPath() {
-  return process.env.QBO_POLICY_FILE || path.join(ROOT, "qbo-policy.json");
+export function policyPath(env = process.env) {
+  return resolveEnvPath(env.QBO_POLICY_FILE, path.join(ROOT, "qbo-policy.json"));
 }
 
 // mtime-cached load. ONLY a missing file means "no policy". An unreadable or

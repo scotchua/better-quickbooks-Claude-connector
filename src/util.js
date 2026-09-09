@@ -216,6 +216,10 @@ export function expandHome(p) {
   return path.join(os.homedir(), ...parts);
 }
 
+export function resolveEnvPath(value, defaultPath) {
+  return path.resolve(expandHome(value || defaultPath));
+}
+
 // Names that user-supplied file paths may never touch, read or write: key
 // material and credential files. Applies regardless of QBO_FILES_DIR.
 const SENSITIVE_BASENAME = /^(\.env(\..*)?|tokens(\..*)?\.json|\.qbo-key(\..*)?|id_rsa.*|id_ed25519.*|.*\.pem|\.npmrc|\.netrc)$/i;
@@ -266,7 +270,7 @@ export async function resolveUserPath(p, { purpose = "read", requireBase = false
     throw new Error(`Refusing to ${purpose} ${path.basename(abs)}: credential-shaped filename.`);
   }
 
-  const base = process.env.QBO_FILES_DIR ? path.resolve(expandHome(process.env.QBO_FILES_DIR)) : null;
+  const base = process.env.QBO_FILES_DIR ? resolveEnvPath(process.env.QBO_FILES_DIR) : null;
   if (!base && requireBase) {
     throw new Error(
       `Refusing to ${purpose} ${abs}: QBO_FILES_DIR is not set, so there is nothing constraining which local ` +
