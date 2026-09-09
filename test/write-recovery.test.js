@@ -3,13 +3,11 @@ import { mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { qboRequest, qboUpload } from "../src/qbo.js";
 import { listUnresolvedWrites, toolContext, writeRecoveryFilePath } from "../src/audit.js";
 
-const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SLUG = "write-recovery-test";
-const TOKEN_FILE = path.join(ROOT, `tokens.${SLUG}.json`);
+const TOKEN_FILE = path.join(process.env.QBO_TOKENS_DIR, `tokens.${SLUG}.json`);
 const ENV_KEYS = ["QBO_AUDIT", "QBO_AUDIT_DIR", "QBO_POLICY_FILE", "QBO_TOKEN_ENCRYPTION"];
 const ORIGINAL_ENV = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
 

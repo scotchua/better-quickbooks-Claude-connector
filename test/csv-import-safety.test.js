@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SLUG = "csv-import-safety-test";
-const TOKEN_FILE = path.join(ROOT, `tokens.${SLUG}.json`);
+const TOKEN_FILE = path.join(process.env.QBO_TOKENS_DIR, `tokens.${SLUG}.json`);
 
 function startServer(preload, { auditDir, policyFile, modeFile, countFile, writeLog, filesDir }) {
   // Node's ESM loader treats a bare Windows absolute path (C:\\...) as a URL

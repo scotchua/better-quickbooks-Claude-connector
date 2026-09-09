@@ -12,7 +12,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SLUG = "closed-period-guard-test";
 const REALM = "987654321098765";
-const TOKEN_FILE = path.join(ROOT, `tokens.${SLUG}.json`);
+const TOKEN_FILE = path.join(process.env.QBO_TOKENS_DIR, `tokens.${SLUG}.json`);
 
 function startServer(preload, tempDir, extraEnv = {}) {
   const child = spawn(process.execPath, ["--import", pathToFileURL(preload).href, "src/index.js"], {

@@ -13,6 +13,7 @@ import { validatePolicy } from "./policy.js";
 import { toolProfileFromEnv } from "./tool-profiles.js";
 import { duplicateRealms } from "./company-registry.js";
 import { expandHome } from "./util.js";
+import { tokensDir } from "./token-directory.js";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ENV_FILE = path.join(ROOT, ".env");
@@ -82,7 +83,7 @@ if (!filesBase) {
 }
 
 try {
-  const names = await readdir(ROOT);
+  const names = await readdir(tokensDir());
   const tokenNames = names.filter((name) => /^tokens(?:\.[A-Za-z0-9_-]+)?\.json$/.test(name));
   if (!tokenNames.length) {
     add("warn", "Company authorizations", "No token files were found.", "Connect a sandbox with connect_company/admin profile, or run the documented production Playground flow.");
@@ -90,7 +91,7 @@ try {
     const loose = [];
     const invalid = [];
     for (const name of tokenNames) {
-      const tokenPath = path.join(ROOT, name);
+      const tokenPath = path.join(tokensDir(), name);
       const mode = (await stat(tokenPath)).mode & 0o777;
       if (mode & 0o077) loose.push(name);
       try {
@@ -126,7 +127,7 @@ try {
 // not look like company token files. Report only counts (never realm ids or
 // slug-bearing filenames) so diagnostics cannot leak client identifiers.
 try {
-  const names = await readdir(ROOT);
+  const names = await readdir(tokensDir());
   const refreshRecoveryCount = names.filter((name) => /^\.qbo-refresh-recovery-[A-Za-z0-9_-]+\.json$/.test(name)).length;
   const disconnectRecoveryCount = names.filter((name) => /^\.qbo-disconnect-recovery-[A-Za-z0-9_-]+\.json$/.test(name)).length;
   const playgroundStageCount = names.filter((name) => /^\.qbo-token-stage-[A-Za-z0-9_-]+\.json$/.test(name)).length;

@@ -13,9 +13,7 @@
 
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-
-const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+import { tokensDir } from "./token-directory.js";
 
 // Retaining a token file without exposing it as a company is a matter of WHERE
 // it lives, not what it is called: this scan does not recurse, so anything
@@ -28,9 +26,10 @@ function log(...args) {
 }
 
 async function scanAuthorizationFiles({ includeDefault = false } = {}) {
+  const directory = tokensDir();
   let files = [];
   try {
-    files = await readdir(ROOT);
+    files = await readdir(directory);
   } catch {
     return [];
   }
@@ -49,7 +48,7 @@ async function scanAuthorizationFiles({ includeDefault = false } = {}) {
       throw new Error(`Token filename ${f} contains an invalid company slug. Move it to backups/ or rename it explicitly.`);
     }
     try {
-      const d = JSON.parse(await readFile(path.join(ROOT, f), "utf8"));
+      const d = JSON.parse(await readFile(path.join(directory, f), "utf8"));
       out.push({ slug, realmId: d.realmId ?? null, environment: d.environment ?? null });
     } catch (e) {
       // Another process may disconnect or atomically replace a company after

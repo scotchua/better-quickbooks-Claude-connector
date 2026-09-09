@@ -450,7 +450,7 @@ describe("MCP startup tool profiles", () => {
 describe("company response provenance", () => {
   async function writeTokenFixture(slug, realmId) {
     const future = Date.now() + 3_600_000;
-    const tokenFile = path.join(ROOT, `tokens.${slug}.json`);
+    const tokenFile = path.join(process.env.QBO_TOKENS_DIR, `tokens.${slug}.json`);
     const tokenStage = `${tokenFile}.${process.pid}.${randomUUID()}.tmp`;
     await writeFile(tokenStage, JSON.stringify({
       access_token: "test-access-token",

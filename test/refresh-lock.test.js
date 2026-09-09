@@ -9,11 +9,9 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rm, writeFile, unlink, utimes, stat } from "node:fs/promises";
 import { hostname } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { withRefreshLock } from "../src/qbo.js";
 
-const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
-const lockFor = (slug) => path.join(ROOT, `.refresh-${slug}.lock`);
+const lockFor = (slug) => path.join(process.env.QBO_TOKENS_DIR, `.refresh-${slug}.lock`);
 
 async function cleanup(slug) {
   await rm(lockFor(slug), { recursive: true, force: true });

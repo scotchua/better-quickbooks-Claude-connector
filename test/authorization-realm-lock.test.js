@@ -3,16 +3,14 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { readFile, rm, stat } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { persistAuthorization } from "../src/qbo.js";
 
-const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const REALM = "919999999999991";
 const SLUGS = ["realm-race-a", "realm-race-b"];
-const tokenPath = (slug) => path.join(ROOT, `tokens.${slug}.json`);
-const refreshLock = (slug) => path.join(ROOT, `.refresh-${slug}.lock`);
+const tokenPath = (slug) => path.join(process.env.QBO_TOKENS_DIR, `tokens.${slug}.json`);
+const refreshLock = (slug) => path.join(process.env.QBO_TOKENS_DIR, `.refresh-${slug}.lock`);
 const realmLock = path.join(
-  ROOT,
+  process.env.QBO_TOKENS_DIR,
   `.realm-authorization-${createHash("sha256").update(REALM).digest("hex").slice(0, 32)}.lock`
 );
 
