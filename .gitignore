@@ -29,12 +29,10 @@ tokens*.json.*.tmp
 /CLAUDE_REVIEW_PROMPT.md
 /REVIEW.md
 
-# Write guardrails (local, names clients). policy.js writes timestamped
-# backups as qbo-policy.json.bak-<stamp>, so the glob must be open-ended.
-qbo-policy.json
-qbo-policy.json.bak*
+# Write guardrails (local, names clients). Keep the policy and all sibling
+# artifacts (backups, locks, probe journals, and future suffixes) ignored.
+qbo-policy.json*
 qbo-policy.*.tmp
-qbo-policy.json.lock
 
 # Local records (write audit log, CSV import journal)
 audit-log/
