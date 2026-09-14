@@ -19,6 +19,7 @@
 // strictest value of each rule wins. See policyFor() and the STRICTEST table.
 
 import { readFile, rename, open, unlink } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -206,8 +207,54 @@ export function validatePolicy(policy, label = "write-policy file") {
   return policy;
 }
 
+// Decision 2, approved by the firm's principal 2026-09-13: the policy file
+// moves out of the directory that holds tokens.<slug>.json. It is the one file
+// in there that is not a credential, and everything that wants to READ it,
+// including a status dashboard that must never be able to read a token, has to
+// be given the whole credential directory to get at it.
+//
+// Both locations are accepted while the move happens, because the readers live
+// in four repositories and they cannot all change in the same instant. The new
+// location wins when it exists; the old one is used, with a warning, when it is
+// the only one there; and when neither exists the NEW path is returned, so a
+// policy written by this server lands in the new place rather than recreating
+// the old one. QBO_POLICY_FILE still overrides everything.
+export const POLICY_SUBDIRECTORY = "policy";
+// Once per distinct message, not once per process: the two conditions below
+// are different facts and an operator who fixes one still needs to hear the
+// other. Bounded by the number of messages in this file, which is two.
+const warned = new Set();
+
+function warnOnce(message) {
+  if (warned.has(message)) return;
+  warned.add(message);
+  console.error(message);
+}
+
+export function defaultPolicyPath(root = ROOT) {
+  const moved = path.join(root, POLICY_SUBDIRECTORY, "qbo-policy.json");
+  const beside = path.join(root, "qbo-policy.json");
+  if (existsSync(moved)) {
+    if (existsSync(beside)) {
+      warnOnce(
+        `two policy files exist: using ${moved} and ignoring ${beside}. ` +
+          "Delete the one beside the credentials once you have checked they agree."
+      );
+    }
+    return moved;
+  }
+  if (existsSync(beside)) {
+    warnOnce(
+      `${beside} still sits in the directory that holds the access tokens. ` +
+        `Move it to ${moved}; every reader accepts both locations today.`
+    );
+    return beside;
+  }
+  return moved;
+}
+
 export function policyPath(env = process.env) {
-  return resolveEnvPath(env.QBO_POLICY_FILE, path.join(ROOT, "qbo-policy.json"));
+  return resolveEnvPath(env.QBO_POLICY_FILE, defaultPolicyPath());
 }
 
 // mtime-cached load. ONLY a missing file means "no policy". An unreadable or

@@ -374,11 +374,17 @@ harmless would bypass amount, source-period, and closed-book checks.
   are skipped, and interrupted rows are healed only when their QBO memo marker
   is found. An absent marker causes a manual-reconciliation refusal instead of
   a second POST, because query absence is not durable proof of non-creation.
-- **Per-company policies** (optional `qbo-policy.json`, see
+- **Per-company policies** (optional `policy/qbo-policy.json`, see
   `qbo-policy.example.json`; `QBO_POLICY_FILE` overrides the path): `read_only`
   companies, `max_write_amount` ceilings, and a `min_txn_date` floor, enforced
   centrally at the API layer so every write tool (including `api_request`)
-  obeys them.
+  obeys them. The file used to sit in the repository root, beside
+  `tokens.<slug>.json`. It is the one file in there that is not a credential,
+  and anything that only needs to READ it had to be given the whole credential
+  directory to get at it, so it moved down into `policy/`. Both locations are
+  read while the move happens: the new one wins, the old one is used with a
+  warning when it is the only one there, and a policy written when neither
+  exists is created in the new one.
 - **Fleet tools** merge per-company report trees by account name;
   duplicates, unknown currencies, mixed bases, and partial report sets are
   refused. `create_journal_entry_multi` preflights every company and requires
