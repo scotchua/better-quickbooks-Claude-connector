@@ -98,7 +98,9 @@ describe("the default policy file itself", () => {
     expect(() => assertDefaultPolicyIsPlainFile({}, root)).not.toThrow();
   });
 
-  it("blocks when the retired location cannot be checked, not just when it exists", async () => {
+  // Windows reports ENOENT for a path under a file, a true not-found there, so
+  // this way of forcing an lstat error only exists on POSIX.
+  it.skipIf(process.platform === "win32")("blocks when the retired location cannot be checked, not just when it exists", async () => {
     // A file in place of the directory makes lstat fail with ENOTDIR, which
     // existsSync would have read as absent.
     await write(path.join(root, "not-a-dir"));
