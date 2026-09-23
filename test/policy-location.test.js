@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { defaultPolicyPath, policyPath, POLICY_SUBDIRECTORY } from "../src/policy.js";
+import { assertPolicyFilesAgree, defaultPolicyPath, policyPath, POLICY_SUBDIRECTORY } from "../src/policy.js";
 
 let root;
 let warnings;
@@ -26,9 +26,9 @@ afterEach(async () => {
 const moved = () => path.join(root, POLICY_SUBDIRECTORY, "qbo-policy.json");
 const beside = () => path.join(root, "qbo-policy.json");
 
-async function write(file) {
+async function write(file, text = "{}\n") {
   await mkdir(path.dirname(file), { recursive: true });
-  await writeFile(file, "{}\n", "utf8");
+  await writeFile(file, text, "utf8");
 }
 
 describe("where the policy file is looked for", () => {
@@ -41,7 +41,7 @@ describe("where the policy file is looked for", () => {
       warning: /still sits in the directory that holds the access tokens/,
     },
     {
-      name: "prefers the new one when both exist, and says which it ignored",
+      name: "prefers the new one when both exist, and says to delete the old one",
       files: [moved, beside],
       want: moved,
       warning: /two policy files exist/,
@@ -61,5 +61,31 @@ describe("where the policy file is looked for", () => {
     const override = path.join(root, "elsewhere.json");
     expect(policyPath({ QBO_POLICY_FILE: override })).toBe(override);
     expect(warnings).toEqual([]);
+  });
+});
+
+describe("two policy files at once", () => {
+  const strict = JSON.stringify({ defaults: { read_only: true } });
+
+  it("allows writes while the two files agree", async () => {
+    await write(moved(), strict + "\n");
+    await write(beside(), strict);
+    await expect(assertPolicyFilesAgree({}, root)).resolves.toBeUndefined();
+  });
+
+  // Codex review 20260923T005126Z-760af6, finding 1: an empty copy appearing in
+  // policy/ must not quietly replace the stricter file still in force.
+  it("blocks writes when a new-location copy disagrees with the old file", async () => {
+    await write(moved(), "{}\n");
+    await write(beside(), strict);
+    await expect(assertPolicyFilesAgree({}, root)).rejects.toThrow(/disagree.*Writes are blocked/);
+  });
+
+  it("has nothing to compare with one file, or with an override", async () => {
+    await write(beside(), strict);
+    await expect(assertPolicyFilesAgree({}, root)).resolves.toBeUndefined();
+    await write(moved(), "{}\n");
+    const override = { QBO_POLICY_FILE: path.join(root, "elsewhere.json") };
+    await expect(assertPolicyFilesAgree(override, root)).resolves.toBeUndefined();
   });
 });

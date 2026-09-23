@@ -54,6 +54,15 @@ function doctor() {
 }
 
 describe("filesystem environment paths", () => {
+  // The policy row above takes its default from defaultPolicyPath; this keeps
+  // that row from passing on some third path.
+  it("defaults the policy file to one of its two transition locations", () => {
+    expect([
+      path.join(ROOT, "policy", "qbo-policy.json"),
+      path.join(ROOT, "qbo-policy.json"),
+    ]).toContain(defaultPolicyPath());
+  });
+
   it.each(paths)("preserves the base-commit default for unset %s", (name, resolve, expected) => {
     vi.stubEnv(name, undefined);
     expect(resolve()).toBe(expected);

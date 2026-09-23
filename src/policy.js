@@ -237,8 +237,8 @@ export function defaultPolicyPath(root = ROOT) {
   const hasBeside = existsSync(beside);
   if (hasMoved && hasBeside) {
     warnOnce(
-      `two policy files exist: using ${moved} and ignoring ${beside}. ` +
-        "Delete the one beside the credentials once you have checked they agree."
+      `two policy files exist: using ${moved}. Delete ${beside}; ` +
+        "if the two ever disagree, writes stop until one of them is gone."
     );
   } else if (hasBeside) {
     warnOnce(
@@ -247,6 +247,33 @@ export function defaultPolicyPath(root = ROOT) {
     );
   }
   return hasMoved || !hasBeside ? moved : beside;
+}
+
+// The new location winning is only safe once somebody has actually moved the
+// file. A copy that appears in policy/ while the old one is still in force,
+// empty or weaker, would otherwise take over without a word. So two files that
+// disagree block writes, as a malformed file does, until an operator deletes
+// the wrong one. Only this case reads both; it is rare and transient.
+export async function assertPolicyFilesAgree(env = process.env, root = ROOT) {
+  if (env.QBO_POLICY_FILE) return;
+  const moved = path.join(root, POLICY_SUBDIRECTORY, "qbo-policy.json");
+  const beside = path.join(root, "qbo-policy.json");
+  if (!existsSync(moved) || !existsSync(beside)) return;
+  let texts;
+  try {
+    texts = await Promise.all([readFile(moved, "utf8"), readFile(beside, "utf8")]);
+  } catch (e) {
+    throw new Error(
+      `Cannot compare the two write-policy files ${moved} and ${beside} (${e.message}). ` +
+        "Writes are blocked until one of them is deleted."
+    );
+  }
+  if (texts[0].trim() !== texts[1].trim()) {
+    throw new Error(
+      `Two write-policy files disagree: ${moved} and ${beside}. ` +
+        "Writes are blocked until you delete the one that is wrong."
+    );
+  }
 }
 
 export function policyPath(env = process.env) {
@@ -261,6 +288,7 @@ export function policyPath(env = process.env) {
 // hand-edit silently turns every read-only company, amount cap, and date floor
 // in this file into "no restrictions", with nothing anywhere saying so.
 export async function loadPolicy() {
+  await assertPolicyFilesAgree();
   const p = policyPath();
   const forget = () => {
     cache.path = null;
@@ -583,11 +611,14 @@ export function setCompanyPolicy(slug, patch = {}) {
   // guarantee to other connector processes; the promise queue still avoids
   // needless local contention and preserves call order within this process.
   const run = async () => {
+    await assertPolicyFilesAgree();
     const p = policyPath();
     // The default sits in ROOT/policy/, which a fresh checkout does not have,
     // and the lock directory is created beside the file. Owner-only, like the
-    // file itself; an existing directory keeps whatever mode it already has.
-    await mkdir(path.dirname(p), { recursive: true, mode: 0o700 });
+    // file itself. Only when missing, so an existing directory, including an
+    // override's, is used exactly as before.
+    const dir = path.dirname(p);
+    if (!existsSync(dir)) await mkdir(dir, { recursive: true, mode: 0o700 });
     return withPolicyFileLock(p, () => setCompanyPolicyUnlocked(slug, patch, p));
   };
   const result = policyWriteQueue.then(run, run);
