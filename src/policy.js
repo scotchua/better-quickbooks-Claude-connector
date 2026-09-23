@@ -18,8 +18,8 @@
 // meant to protect, so every slug addressing one realm contributes and the
 // strictest value of each rule wins. See policyFor() and the STRICTEST table.
 
-import { readFile, rename, open, unlink, mkdir } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { readFile, rename, open, unlink, mkdir, readdir, lstat } from "node:fs/promises";
+import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -208,79 +208,80 @@ export function validatePolicy(policy, label = "write-policy file") {
 }
 
 // Decision 2, approved by the firm's principal 2026-09-13: the policy file
-// moves out of the directory that holds tokens.<slug>.json. It is the one file
-// in there that is not a credential, and everything that wants to READ it,
-// including a status dashboard that must never be able to read a token, has to
-// be given the whole credential directory to get at it.
-//
-// Both locations are accepted while the move happens, because the readers live
-// in four repositories and they cannot all change in the same instant. Which one
-// wins is pinned in test/policy-location.test.js; DEVELOPER.md states it for
-// operators. QBO_POLICY_FILE still overrides everything.
+// lives in policy/, not in the directory that holds tokens.<slug>.json. It is
+// the one file there that is not a credential, and anything that wants only to
+// READ it, a status dashboard most of all, should not need the credential
+// directory to get at it. The live file moved on 2026-09-23; the old location
+// is no longer read. QBO_POLICY_FILE still overrides everything.
 export const POLICY_SUBDIRECTORY = "policy";
-// Keyed on the rendered message, which embeds the paths: once per condition per
-// root, so two entries in production. An operator who fixes one condition still
-// hears the other.
-const warned = new Set();
-
-function warnOnce(message) {
-  if (warned.has(message)) return;
-  warned.add(message);
-  console.error("[qbo-policy]", message);
-}
 
 // root is a test seam; production always resolves against ROOT.
 export function defaultPolicyPath(root = ROOT) {
-  const moved = path.join(root, POLICY_SUBDIRECTORY, "qbo-policy.json");
-  const beside = path.join(root, "qbo-policy.json");
-  const hasMoved = existsSync(moved);
-  const hasBeside = existsSync(beside);
-  if (hasMoved && hasBeside) {
-    warnOnce(
-      `two policy files exist: using ${moved}. Delete ${beside}; ` +
-        "if the two ever disagree, writes stop until one of them is gone."
-    );
-  } else if (hasBeside) {
-    warnOnce(
-      `${beside} still sits in the directory that holds the access tokens. ` +
-        `Move it to ${moved}; every reader accepts both locations today.`
-    );
-  }
-  return hasMoved || !hasBeside ? moved : beside;
+  return path.join(root, POLICY_SUBDIRECTORY, "qbo-policy.json");
 }
 
-// The new location winning is only safe once somebody has actually moved the
-// file. A copy that appears in policy/ while the old one is still in force,
-// empty or weaker, would otherwise take over without a word. So two files that
-// disagree block writes, as a malformed file does, until an operator deletes
-// the wrong one. Only this case reads both; it is rare and transient.
-export async function assertPolicyFilesAgree(env = process.env, root = ROOT) {
-  if (env.QBO_POLICY_FILE) return;
-  const moved = path.join(root, POLICY_SUBDIRECTORY, "qbo-policy.json");
-  const beside = path.join(root, "qbo-policy.json");
-  if (!existsSync(moved) || !existsSync(beside)) return;
-  let texts;
+// A policy file in the old location means something still writes there, or an
+// install upgraded without moving it. Ignoring it could run a firm with no rules
+// at all, so it blocks writes, as a malformed file does, until it is gone.
+// An override is exempt only when it names somewhere other than the default:
+// pointing QBO_POLICY_FILE at policy/qbo-policy.json is still the default file.
+export function assertNoRetiredPolicyFile(env = process.env, root = ROOT) {
+  if (overriddenPolicy(env) && canonical(policyPath(env)) !== canonical(defaultPolicyPath(root))) return;
+  const retired = path.join(root, "qbo-policy.json");
+  if (existsSync(retired)) {
+    throw new Error(
+      `A write-policy file sits at ${retired}, the old location beside the access tokens, which is no longer read. ` +
+        `Writes are blocked until it is gone: move it to ${defaultPolicyPath(root)} if that file does not exist yet, ` +
+        "otherwise delete whichever copy is wrong."
+    );
+  }
+}
+
+// Through symlinks, as Python's Path.resolve does, so a linked path that names
+// the default file is still the default file. A missing path compares as given.
+function canonical(p) {
   try {
-    texts = await Promise.all([readFile(moved, "utf8"), readFile(beside, "utf8")]);
-  } catch (e) {
-    throw new Error(
-      `Cannot compare the two write-policy files ${moved} and ${beside} (${e.message}). ` +
-        "Writes are blocked until one of them is deleted."
-    );
+    return realpathSync(p);
+  } catch {
+    return p;
   }
-  if (texts[0].trim() !== texts[1].trim()) {
-    throw new Error(
-      `Two write-policy files disagree: ${moved} and ${beside}. ` +
-        "Writes are blocked until you delete the one that is wrong."
-    );
-  }
+}
+
+// Blank or whitespace-only means unset, as in the Python readers.
+function overriddenPolicy(env) {
+  return (env.QBO_POLICY_FILE ?? "").trim();
 }
 
 export function policyPath(env = process.env) {
-  // Probe the default only when the override does not win: the probes run on
-  // every write, and warning about a file this process will never open misleads.
-  if (env.QBO_POLICY_FILE) return resolveEnvPath(env.QBO_POLICY_FILE);
-  return resolveEnvPath(undefined, defaultPolicyPath());
+  const override = overriddenPolicy(env);
+  if (override) return resolveEnvPath(override);
+  return defaultPolicyPath();
+}
+
+// Every change leaves a backup beside the file, and unbounded they passed a
+// hundred. Keep the newest by modification time; the one just made is always
+// among them. Subdirectories such as policy/old-backups/ are never touched, and
+// a failed prune never fails the write that preceded it.
+export const KEEP_POLICY_BACKUPS = 30;
+
+export async function prunePolicyBackups(p, keep = KEEP_POLICY_BACKUPS) {
+  const dir = path.dirname(p);
+  const prefix = `${path.basename(p)}.bak-`;
+  try {
+    const found = [];
+    for (const name of await readdir(dir)) {
+      if (!name.startsWith(prefix)) continue;
+      const file = path.join(dir, name);
+      const info = await lstat(file);
+      if (info.isFile()) found.push({ file, mtime: info.mtimeMs });
+    }
+    // Newest first; equal times fall back to the name, whose timestamp prefix
+    // sorts chronologically, so the result never depends on directory order.
+    found.sort((a, b) => b.mtime - a.mtime || (a.file < b.file ? 1 : a.file > b.file ? -1 : 0));
+    for (const { file } of found.slice(keep)) await unlink(file);
+  } catch (e) {
+    console.error("[qbo-policy]", `could not prune old policy backups in ${dir} (${e.message}); the write itself succeeded.`);
+  }
 }
 
 // mtime-cached load. ONLY a missing file means "no policy". An unreadable or
@@ -289,10 +290,9 @@ export function policyPath(env = process.env) {
 // in this file into "no restrictions", with nothing anywhere saying so.
 export async function loadPolicy() {
   const policy = await loadPolicyFile();
-  // Compared after the read, not before: a copy appearing in the other location
-  // between a check and the open would otherwise slip through (Codex review
-  // 20260923T005808Z-132db0, finding 3). One appearing later is caught next time.
-  await assertPolicyFilesAgree();
+  // After the read, so a file appearing in the old location while this ran is
+  // still caught (Codex review 20260923T005808Z-132db0, finding 3).
+  assertNoRetiredPolicyFile();
   return policy;
 }
 
@@ -627,13 +627,10 @@ export function setCompanyPolicy(slug, patch = {}) {
     const dir = path.dirname(p);
     if (!existsSync(dir)) await mkdir(dir, { recursive: true, mode: 0o700 });
     return withPolicyFileLock(p, async () => {
-      // Checked under the lock: two copies that disagree, or a file moved while
-      // this waited, must stop the write rather than edit a file nobody reads.
-      await assertPolicyFilesAgree();
-      if (policyPath() !== p) {
-        throw new Error(`The write-policy file moved from ${p} while this change waited. Nothing was written; try again.`);
-      }
-      return setCompanyPolicyUnlocked(slug, patch, p);
+      assertNoRetiredPolicyFile();
+      const result = await setCompanyPolicyUnlocked(slug, patch, p);
+      await prunePolicyBackups(p);
+      return result;
     });
   };
   const result = policyWriteQueue.then(run, run);
