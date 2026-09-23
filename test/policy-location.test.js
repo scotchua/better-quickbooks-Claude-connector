@@ -10,6 +10,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import {
+  assertDefaultPolicyIsPlainFile,
   assertNoRetiredPolicyFile,
   defaultPolicyPath,
   KEEP_POLICY_BACKUPS,
@@ -80,6 +81,34 @@ describe("a policy file in the retired location", () => {
   });
 });
 
+describe("the default policy file itself", () => {
+  it("must be a regular file, not a link to something else", async () => {
+    const token = path.join(root, "tokens.acme.json");
+    await write(token, '{"secret": true}\n');
+    await mkdir(path.dirname(current()), { recursive: true });
+    await symlink(token, current());
+    expect(() => assertDefaultPolicyIsPlainFile({}, root)).toThrow(/symbolic link.*Writes are blocked/);
+    const override = { QBO_POLICY_FILE: path.join(root, "elsewhere.json") };
+    expect(() => assertDefaultPolicyIsPlainFile(override, root)).not.toThrow();
+  });
+
+  it("is fine when absent or a plain file", async () => {
+    expect(() => assertDefaultPolicyIsPlainFile({}, root)).not.toThrow();
+    await write(current());
+    expect(() => assertDefaultPolicyIsPlainFile({}, root)).not.toThrow();
+  });
+
+  // Windows reports ENOENT for a path under a file, a true not-found there, so
+  // this way of forcing an lstat error only exists on POSIX.
+  it.skipIf(process.platform === "win32")("blocks when the retired location cannot be checked, not just when it exists", async () => {
+    // A file in place of the directory makes lstat fail with ENOTDIR, which
+    // existsSync would have read as absent.
+    await write(path.join(root, "not-a-dir"));
+    expect(() => assertNoRetiredPolicyFile({}, path.join(root, "not-a-dir")))
+      .toThrow(/Cannot check .*Writes are blocked/);
+  });
+});
+
 // The real write path, run against a copy of src/ so ROOT is a scratch folder
 // and the live connector root is never touched.
 describe("the write path itself", () => {
@@ -123,6 +152,15 @@ describe("the write path itself", () => {
     expect(out).toMatch(/^REFUSED .*Writes are blocked/);
     expect(await readFile(current(), "utf8")).toBe(rules);
     expect((await readdir(path.dirname(current()))).filter((n) => n.includes(".bak-"))).toEqual([]);
+  });
+
+  it("refuses, and leaves the target alone, when the default file is a link to a token file", async () => {
+    const token = path.join(root, "tokens.acme.json");
+    await write(token, '{"secret": true}\n');
+    await mkdir(path.dirname(current()), { recursive: true });
+    await symlink(token, current());
+    expect(await attempt({ QBO_POLICY_FILE: "" })).toMatch(/^REFUSED .*symbolic link/);
+    expect(await readFile(token, "utf8")).toBe('{"secret": true}\n');
   });
 
   it("still refuses when QBO_POLICY_FILE reaches the default file through a symlink", async () => {
