@@ -19,7 +19,7 @@
 // strictest value of each rule wins. See policyFor() and the STRICTEST table.
 
 import { readFile, rename, open, unlink, mkdir, readdir, lstat } from "node:fs/promises";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -225,15 +225,51 @@ export function defaultPolicyPath(root = ROOT) {
 // at all, so it blocks writes, as a malformed file does, until it is gone.
 // An override is exempt only when it names somewhere other than the default:
 // pointing QBO_POLICY_FILE at policy/qbo-policy.json is still the default file.
+//
+// Only a confirmed not-found passes: existsSync also answers false on EACCES,
+// which would let an unreadable retired file slip through.
 export function assertNoRetiredPolicyFile(env = process.env, root = ROOT) {
-  if (overriddenPolicy(env) && canonical(policyPath(env)) !== canonical(defaultPolicyPath(root))) return;
+  if (!usesDefaultPolicy(env, root)) return;
   const retired = path.join(root, "qbo-policy.json");
-  if (existsSync(retired)) {
-    throw new Error(
-      `A write-policy file sits at ${retired}, the old location beside the access tokens, which is no longer read. ` +
-        `Writes are blocked until it is gone: move it to ${defaultPolicyPath(root)} if that file does not exist yet, ` +
-        "otherwise delete whichever copy is wrong."
-    );
+  if (lstatOrMissing(retired, "the old write-policy location") === null) return;
+  throw new Error(
+    `A write-policy file sits at ${retired}, the old location beside the access tokens, which is no longer read. ` +
+      `Writes are blocked until it is gone: move it to ${defaultPolicyPath(root)} if that file does not exist yet, ` +
+      "otherwise delete whichever copy is wrong."
+  );
+}
+
+// The default file must be a regular file, never a symlink: a link there could
+// hand a policy-only reader a token file, the separation Decision 2 exists for.
+// An explicit override naming another file may still be a link.
+export function assertDefaultPolicyIsPlainFile(env = process.env, root = ROOT) {
+  if (!usesDefaultPolicy(env, root)) return;
+  const file = defaultPolicyPath(root);
+  const info = lstatOrMissing(file, "the write-policy file");
+  if (info === null || info.isFile()) return;
+  throw new Error(
+    `${file} is ${info.isSymbolicLink() ? "a symbolic link" : "not a regular file"}. Writes are blocked until it is ` +
+      "replaced by the policy file itself; point QBO_POLICY_FILE at another file if a link is intended."
+  );
+}
+
+export function assertPolicyLocation(env = process.env, root = ROOT) {
+  assertNoRetiredPolicyFile(env, root);
+  assertDefaultPolicyIsPlainFile(env, root);
+}
+
+// An override is exempt only when it names somewhere other than the default.
+function usesDefaultPolicy(env, root) {
+  return !overriddenPolicy(env) || canonical(policyPath(env)) === canonical(defaultPolicyPath(root));
+}
+
+// The entry itself, or null when confirmed absent; anything else blocks writes.
+function lstatOrMissing(file, what) {
+  try {
+    return lstatSync(file);
+  } catch (e) {
+    if (e.code === "ENOENT") return null;
+    throw new Error(`Cannot check ${what} at ${file} (${e.message}). Writes are blocked until it can be checked.`);
   }
 }
 
@@ -289,10 +325,12 @@ export async function prunePolicyBackups(p, keep = KEEP_POLICY_BACKUPS) {
 // hand-edit silently turns every read-only company, amount cap, and date floor
 // in this file into "no restrictions", with nothing anywhere saying so.
 export async function loadPolicy() {
+  // Before the read, so a linked default is never opened; and again after it,
+  // so a file appearing in the old location while this ran is still caught
+  // (Codex review 20260923T005808Z-132db0, finding 3).
+  assertPolicyLocation();
   const policy = await loadPolicyFile();
-  // After the read, so a file appearing in the old location while this ran is
-  // still caught (Codex review 20260923T005808Z-132db0, finding 3).
-  assertNoRetiredPolicyFile();
+  assertPolicyLocation();
   return policy;
 }
 
@@ -627,7 +665,7 @@ export function setCompanyPolicy(slug, patch = {}) {
     const dir = path.dirname(p);
     if (!existsSync(dir)) await mkdir(dir, { recursive: true, mode: 0o700 });
     return withPolicyFileLock(p, async () => {
-      assertNoRetiredPolicyFile();
+      assertPolicyLocation();
       const result = await setCompanyPolicyUnlocked(slug, patch, p);
       await prunePolicyBackups(p);
       return result;
