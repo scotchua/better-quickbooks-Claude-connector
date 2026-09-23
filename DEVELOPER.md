@@ -381,10 +381,11 @@ harmless would bypass amount, source-period, and closed-book checks.
   obeys them. The file used to sit in the repository root, beside
   `tokens.<slug>.json`. It is the one file in there that is not a credential,
   and anything that only needs to READ it had to be given the whole credential
-  directory to get at it, so it moved down into `policy/`. Both locations are
-  read while the move happens: the new one wins, the old one is used with a
-  warning when it is the only one there, and a policy written when neither
-  exists is created in the new one.
+  directory to get at it, so it moved down into `policy/`. The old location is
+  no longer read: a `qbo-policy.json` found in the root blocks writes until it
+  is moved into `policy/` or deleted, because ignoring it could leave an
+  upgraded install running with no rules. Each change keeps a timestamped
+  backup beside the file, and only the newest 30 are kept.
 - **Fleet tools** merge per-company report trees by account name;
   duplicates, unknown currencies, mixed bases, and partial report sets are
   refused. `create_journal_entry_multi` preflights every company and requires

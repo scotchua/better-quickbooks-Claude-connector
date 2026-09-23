@@ -336,6 +336,26 @@ describe("checkWritePolicy", () => {
     }
   });
 
+  it("keeps only the newest backups after each write", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "qbo-policy-prune-"));
+    const file = path.join(dir, "qbo-policy.json");
+    process.env.QBO_POLICY_FILE = file;
+    await writeFile(file, JSON.stringify({ companies: {} }));
+    // Seed older backups rather than making 35 real, fsynced writes.
+    for (let i = 0; i < 34; i++) {
+      const old = `${file}.bak-seed${String(i).padStart(2, "0")}`;
+      await writeFile(old, "{}");
+      const when = new Date(Date.UTC(2026, 0, 1) + i * 60_000);
+      await utimes(old, when, when);
+    }
+    const { backup } = await setCompanyPolicy("acme", { read_only: true });
+    const backups = (await readdir(dir)).filter((n) => n.startsWith("qbo-policy.json.bak-"));
+    expect(backups).toHaveLength(30);
+    expect(backups).toContain(path.basename(backup));
+    expect(backups).not.toContain("qbo-policy.json.bak-seed04");
+    expect(backups).toContain("qbo-policy.json.bak-seed05");
+  });
+
   it("leaves other companies' rules intact when writing one", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "qbo-policy-merge-"));
     process.env.QBO_POLICY_FILE = path.join(dir, "qbo-policy.json");
