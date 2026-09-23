@@ -214,47 +214,46 @@ export function validatePolicy(policy, label = "write-policy file") {
 // be given the whole credential directory to get at it.
 //
 // Both locations are accepted while the move happens, because the readers live
-// in four repositories and they cannot all change in the same instant. The new
-// location wins when it exists; the old one is used, with a warning, when it is
-// the only one there; and when neither exists the NEW path is returned, so a
-// policy written by this server lands in the new place rather than recreating
-// the old one. QBO_POLICY_FILE still overrides everything.
+// in four repositories and they cannot all change in the same instant. Which one
+// wins is pinned in test/policy-location.test.js; DEVELOPER.md states it for
+// operators. QBO_POLICY_FILE still overrides everything.
 export const POLICY_SUBDIRECTORY = "policy";
-// Once per distinct message, not once per process: the two conditions below
-// are different facts and an operator who fixes one still needs to hear the
-// other. Bounded by the number of messages in this file, which is two.
+// Keyed on the rendered message, which embeds the paths: once per condition per
+// root, so two entries in production. An operator who fixes one condition still
+// hears the other.
 const warned = new Set();
 
 function warnOnce(message) {
   if (warned.has(message)) return;
   warned.add(message);
-  console.error(message);
+  console.error("[qbo-policy]", message);
 }
 
+// root is a test seam; production always resolves against ROOT.
 export function defaultPolicyPath(root = ROOT) {
   const moved = path.join(root, POLICY_SUBDIRECTORY, "qbo-policy.json");
   const beside = path.join(root, "qbo-policy.json");
-  if (existsSync(moved)) {
-    if (existsSync(beside)) {
-      warnOnce(
-        `two policy files exist: using ${moved} and ignoring ${beside}. ` +
-          "Delete the one beside the credentials once you have checked they agree."
-      );
-    }
-    return moved;
-  }
-  if (existsSync(beside)) {
+  const hasMoved = existsSync(moved);
+  const hasBeside = existsSync(beside);
+  if (hasMoved && hasBeside) {
+    warnOnce(
+      `two policy files exist: using ${moved} and ignoring ${beside}. ` +
+        "Delete the one beside the credentials once you have checked they agree."
+    );
+  } else if (hasBeside) {
     warnOnce(
       `${beside} still sits in the directory that holds the access tokens. ` +
         `Move it to ${moved}; every reader accepts both locations today.`
     );
-    return beside;
   }
-  return moved;
+  return hasMoved || !hasBeside ? moved : beside;
 }
 
 export function policyPath(env = process.env) {
-  return resolveEnvPath(env.QBO_POLICY_FILE, defaultPolicyPath());
+  // Probe the default only when the override does not win: the probes run on
+  // every write, and warning about a file this process will never open misleads.
+  if (env.QBO_POLICY_FILE) return resolveEnvPath(env.QBO_POLICY_FILE);
+  return resolveEnvPath(undefined, defaultPolicyPath());
 }
 
 // mtime-cached load. ONLY a missing file means "no policy". An unreadable or

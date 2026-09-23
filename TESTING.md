@@ -186,12 +186,12 @@ Date,Description,Amount
       Pass: one line per write you made, each with company, realm, entity,
       amount, and an `intuit_tid`.
 - [ ] **Policy: read-only client.** Copy `qbo-policy.example.json` to
-      `qbo-policy.json` with `{"companies": {"test1": {"read_only": true}}}`.
+      `policy/qbo-policy.json` with `{"companies": {"test1": {"read_only": true}}}`.
       Try any write to test1 (no restart needed).
       Pass: refused with a policy message naming the file. Reads still work.
 - [ ] **Policy: amount ceiling.** Change it to
       `{"defaults": {"max_write_amount": 100}}` and try a $250 invoice.
-      Pass: refused. Delete `qbo-policy.json` when done.
+      Pass: refused. Delete `policy/qbo-policy.json` when done.
 - [ ] **QBO posting-off deployment.** Set `QBO_DISABLE_WRITES=true` in `.env`, restart
       Claude Desktop, and open Settings, Connectors, qbo.
       Pass: QBO bookkeeping/outward-write tools are **gone from the list**, not

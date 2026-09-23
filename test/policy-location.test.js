@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { defaultPolicyPath, POLICY_SUBDIRECTORY } from "../src/policy.js";
+import { defaultPolicyPath, policyPath, POLICY_SUBDIRECTORY } from "../src/policy.js";
 
 let root;
 let warnings;
@@ -15,7 +15,7 @@ let warnings;
 beforeEach(async () => {
   root = await mkdtemp(path.join(tmpdir(), "qbo-policy-location-"));
   warnings = [];
-  vi.spyOn(console, "error").mockImplementation((line) => warnings.push(String(line)));
+  vi.spyOn(console, "error").mockImplementation((...args) => warnings.push(args.join(" ")));
 });
 
 afterEach(async () => {
@@ -32,28 +32,34 @@ async function write(file) {
 }
 
 describe("where the policy file is looked for", () => {
-  it("uses the new location when it is there", async () => {
-    await write(moved());
-    expect(defaultPolicyPath(root)).toBe(moved());
+  it.each([
+    { name: "uses the new location when it is there", files: [moved], want: moved, warning: null },
+    {
+      name: "uses the old location when it is the only one, and says so",
+      files: [beside],
+      want: beside,
+      warning: /still sits in the directory that holds the access tokens/,
+    },
+    {
+      name: "prefers the new one when both exist, and says which it ignored",
+      files: [moved, beside],
+      want: moved,
+      warning: /two policy files exist/,
+    },
+    // No file at all is the path a policy WRITE creates. Returning the old one
+    // here would recreate the file beside the credentials after somebody moved it.
+    { name: "points at the new location when there is no policy file at all", files: [], want: moved, warning: null },
+  ])("$name", async ({ files, want, warning }) => {
+    for (const file of files) await write(file());
+    expect(defaultPolicyPath(root)).toBe(want());
+    if (warning) expect(warnings.join("\n")).toMatch(warning);
+    else expect(warnings).toEqual([]);
   });
 
-  it("uses the old location when it is the only one, and says so", async () => {
+  it("does not probe or warn about the default when QBO_POLICY_FILE wins", async () => {
     await write(beside());
-    expect(defaultPolicyPath(root)).toBe(beside());
-    expect(warnings.join("\n")).toMatch(/still sits in the directory that holds the access tokens/);
-  });
-
-  it("prefers the new one when both exist, and says which it ignored", async () => {
-    await write(moved());
-    await write(beside());
-    expect(defaultPolicyPath(root)).toBe(moved());
-    expect(warnings.join("\n")).toMatch(/two policy files exist/);
-  });
-
-  it("points at the new location when there is no policy file at all", () => {
-    // This is the path a policy WRITE creates. Returning the old one here
-    // would recreate the file beside the credentials after somebody moved it.
-    expect(defaultPolicyPath(root)).toBe(moved());
+    const override = path.join(root, "elsewhere.json");
+    expect(policyPath({ QBO_POLICY_FILE: override })).toBe(override);
     expect(warnings).toEqual([]);
   });
 });
