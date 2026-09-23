@@ -33,6 +33,10 @@ tokens*.json.*.tmp
 # artifacts (backups, locks, probe journals, and future suffixes) ignored.
 qbo-policy.json*
 qbo-policy.*.tmp
+# Decision 2: the live policy file moved out of the credential directory into
+# policy/. It is still a local operating file, not something to commit.
+policy/qbo-policy.json*
+policy/qbo-policy.*.tmp
 
 # Local records (write audit log, CSV import journal)
 audit-log/

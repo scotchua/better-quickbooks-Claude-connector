@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { auditDir } from "../src/audit.js";
 import { clientsPath } from "../src/clients.js";
-import { loadPolicy, policyPath } from "../src/policy.js";
+import { defaultPolicyPath, loadPolicy, policyPath } from "../src/policy.js";
 import { tokensDir } from "../src/token-directory.js";
 import { resolveEnvPath, resolveUserPath } from "../src/util.js";
 
@@ -15,7 +15,9 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const paths = [
   ["QBO_TOKENS_DIR", tokensDir, ROOT, "QBO_TOKENS_DIR"],
   ["QBO_AUDIT_DIR", auditDir, path.join(ROOT, "audit-log"), "Audit journal"],
-  ["QBO_POLICY_FILE", policyPath, path.join(ROOT, "qbo-policy.json"), "Write policy"],
+  // Which of the two locations is the default depends on which files exist; that
+  // choice is pinned in policy-location.test.js, so this only checks it is used.
+  ["QBO_POLICY_FILE", policyPath, defaultPolicyPath(), "Write policy"],
   ["QBO_CLIENTS_FILE", clientsPath, path.join(ROOT, "clients.json"), "QBO_CLIENTS_FILE"],
 ];
 let directory;
@@ -52,6 +54,15 @@ function doctor() {
 }
 
 describe("filesystem environment paths", () => {
+  // The policy row above takes its default from defaultPolicyPath; this keeps
+  // that row from passing on some third path.
+  it("defaults the policy file to one of its two transition locations", () => {
+    expect([
+      path.join(ROOT, "policy", "qbo-policy.json"),
+      path.join(ROOT, "qbo-policy.json"),
+    ]).toContain(defaultPolicyPath());
+  });
+
   it.each(paths)("preserves the base-commit default for unset %s", (name, resolve, expected) => {
     vi.stubEnv(name, undefined);
     expect(resolve()).toBe(expected);

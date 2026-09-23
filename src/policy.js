@@ -18,7 +18,8 @@
 // meant to protect, so every slug addressing one realm contributes and the
 // strictest value of each rule wins. See policyFor() and the STRICTEST table.
 
-import { readFile, rename, open, unlink } from "node:fs/promises";
+import { readFile, rename, open, unlink, mkdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -206,8 +207,80 @@ export function validatePolicy(policy, label = "write-policy file") {
   return policy;
 }
 
+// Decision 2, approved by the firm's principal 2026-09-13: the policy file
+// moves out of the directory that holds tokens.<slug>.json. It is the one file
+// in there that is not a credential, and everything that wants to READ it,
+// including a status dashboard that must never be able to read a token, has to
+// be given the whole credential directory to get at it.
+//
+// Both locations are accepted while the move happens, because the readers live
+// in four repositories and they cannot all change in the same instant. Which one
+// wins is pinned in test/policy-location.test.js; DEVELOPER.md states it for
+// operators. QBO_POLICY_FILE still overrides everything.
+export const POLICY_SUBDIRECTORY = "policy";
+// Keyed on the rendered message, which embeds the paths: once per condition per
+// root, so two entries in production. An operator who fixes one condition still
+// hears the other.
+const warned = new Set();
+
+function warnOnce(message) {
+  if (warned.has(message)) return;
+  warned.add(message);
+  console.error("[qbo-policy]", message);
+}
+
+// root is a test seam; production always resolves against ROOT.
+export function defaultPolicyPath(root = ROOT) {
+  const moved = path.join(root, POLICY_SUBDIRECTORY, "qbo-policy.json");
+  const beside = path.join(root, "qbo-policy.json");
+  const hasMoved = existsSync(moved);
+  const hasBeside = existsSync(beside);
+  if (hasMoved && hasBeside) {
+    warnOnce(
+      `two policy files exist: using ${moved}. Delete ${beside}; ` +
+        "if the two ever disagree, writes stop until one of them is gone."
+    );
+  } else if (hasBeside) {
+    warnOnce(
+      `${beside} still sits in the directory that holds the access tokens. ` +
+        `Move it to ${moved}; every reader accepts both locations today.`
+    );
+  }
+  return hasMoved || !hasBeside ? moved : beside;
+}
+
+// The new location winning is only safe once somebody has actually moved the
+// file. A copy that appears in policy/ while the old one is still in force,
+// empty or weaker, would otherwise take over without a word. So two files that
+// disagree block writes, as a malformed file does, until an operator deletes
+// the wrong one. Only this case reads both; it is rare and transient.
+export async function assertPolicyFilesAgree(env = process.env, root = ROOT) {
+  if (env.QBO_POLICY_FILE) return;
+  const moved = path.join(root, POLICY_SUBDIRECTORY, "qbo-policy.json");
+  const beside = path.join(root, "qbo-policy.json");
+  if (!existsSync(moved) || !existsSync(beside)) return;
+  let texts;
+  try {
+    texts = await Promise.all([readFile(moved, "utf8"), readFile(beside, "utf8")]);
+  } catch (e) {
+    throw new Error(
+      `Cannot compare the two write-policy files ${moved} and ${beside} (${e.message}). ` +
+        "Writes are blocked until one of them is deleted."
+    );
+  }
+  if (texts[0].trim() !== texts[1].trim()) {
+    throw new Error(
+      `Two write-policy files disagree: ${moved} and ${beside}. ` +
+        "Writes are blocked until you delete the one that is wrong."
+    );
+  }
+}
+
 export function policyPath(env = process.env) {
-  return resolveEnvPath(env.QBO_POLICY_FILE, path.join(ROOT, "qbo-policy.json"));
+  // Probe the default only when the override does not win: the probes run on
+  // every write, and warning about a file this process will never open misleads.
+  if (env.QBO_POLICY_FILE) return resolveEnvPath(env.QBO_POLICY_FILE);
+  return resolveEnvPath(undefined, defaultPolicyPath());
 }
 
 // mtime-cached load. ONLY a missing file means "no policy". An unreadable or
@@ -215,6 +288,15 @@ export function policyPath(env = process.env) {
 // hand-edit silently turns every read-only company, amount cap, and date floor
 // in this file into "no restrictions", with nothing anywhere saying so.
 export async function loadPolicy() {
+  const policy = await loadPolicyFile();
+  // Compared after the read, not before: a copy appearing in the other location
+  // between a check and the open would otherwise slip through (Codex review
+  // 20260923T005808Z-132db0, finding 3). One appearing later is caught next time.
+  await assertPolicyFilesAgree();
+  return policy;
+}
+
+async function loadPolicyFile() {
   const p = policyPath();
   const forget = () => {
     cache.path = null;
@@ -536,9 +618,23 @@ export function setCompanyPolicy(slug, patch = {}) {
   // other company's guardrail. The owner-marker directory lock extends that
   // guarantee to other connector processes; the promise queue still avoids
   // needless local contention and preserves call order within this process.
-  const run = () => {
+  const run = async () => {
     const p = policyPath();
-    return withPolicyFileLock(p, () => setCompanyPolicyUnlocked(slug, patch, p));
+    // The default sits in ROOT/policy/, which a fresh checkout does not have,
+    // and the lock directory is created beside the file. Owner-only, like the
+    // file itself. Only when missing, so an existing directory, including an
+    // override's, is used exactly as before.
+    const dir = path.dirname(p);
+    if (!existsSync(dir)) await mkdir(dir, { recursive: true, mode: 0o700 });
+    return withPolicyFileLock(p, async () => {
+      // Checked under the lock: two copies that disagree, or a file moved while
+      // this waited, must stop the write rather than edit a file nobody reads.
+      await assertPolicyFilesAgree();
+      if (policyPath() !== p) {
+        throw new Error(`The write-policy file moved from ${p} while this change waited. Nothing was written; try again.`);
+      }
+      return setCompanyPolicyUnlocked(slug, patch, p);
+    });
   };
   const result = policyWriteQueue.then(run, run);
   policyWriteQueue = result.catch(() => {});

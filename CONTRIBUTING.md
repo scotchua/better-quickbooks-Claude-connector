@@ -12,7 +12,8 @@ Upstreamed fixes also mean you stop maintaining a private patch forever.
   client names, realm IDs, tokens, or figures from live books. Use invented
   names and obviously fake realms (e.g. `9999999999123456`).
 - Never commit secrets. `.env`, `tokens*.json`, `clients.json`, and
-  `qbo-policy.json` are gitignored on purpose; keep them that way.
+  `qbo-policy.json` (in the root or in `policy/`) are gitignored on purpose;
+  keep them that way.
 - Write-path changes (anything under a `create_`, `update_`, `delete_`,
   `void_`, `send_`, or `import_` tool, or `policy.js`) get extra scrutiny:
   these post to real accounting ledgers. Say in the PR how you tested against

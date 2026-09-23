@@ -323,6 +323,19 @@ describe("checkWritePolicy", () => {
     await expect(checkWritePolicy("acme", { TotalAmt: 1 })).resolves.toBeUndefined();
   });
 
+  it("creates a missing policy directory, owner-only, on the first write", async () => {
+    // The default now lives in ROOT/policy/, which a fresh checkout does not have.
+    const dir = await mkdtemp(path.join(tmpdir(), "qbo-policy-nodir-"));
+    const file = path.join(dir, "policy", "qbo-policy.json");
+    process.env.QBO_POLICY_FILE = file;
+
+    await setCompanyPolicy("acme", { read_only: true });
+    expect(JSON.parse(await readFile(file, "utf8")).companies.acme).toEqual({ read_only: true });
+    if (process.platform !== "win32") {
+      expect((await stat(path.dirname(file))).mode & 0o777).toBe(0o700);
+    }
+  });
+
   it("leaves other companies' rules intact when writing one", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "qbo-policy-merge-"));
     process.env.QBO_POLICY_FILE = path.join(dir, "qbo-policy.json");
