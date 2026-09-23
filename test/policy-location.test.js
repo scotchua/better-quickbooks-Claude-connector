@@ -3,9 +3,12 @@
 // retired: never read, and a file found there blocks writes rather than being
 // ignored, since ignoring it could leave an upgraded install with no rules.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdir, mkdtemp, readdir, rm, utimes, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { copyFile, cp, link, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import {
   assertNoRetiredPolicyFile,
   defaultPolicyPath,
@@ -15,11 +18,12 @@ import {
   prunePolicyBackups,
 } from "../src/policy.js";
 
+const execFileP = promisify(execFile);
 let root;
 let warnings;
 
 beforeEach(async () => {
-  root = await mkdtemp(path.join(tmpdir(), "qbo-policy-location-"));
+  root = await realpath(await mkdtemp(path.join(tmpdir(), "qbo-policy-location-")));
   warnings = [];
   vi.spyOn(console, "error").mockImplementation((...args) => warnings.push(args.join(" ")));
 });
@@ -68,6 +72,50 @@ describe("a policy file in the retired location", () => {
     const override = { QBO_POLICY_FILE: path.join(root, "elsewhere.json") };
     expect(() => assertNoRetiredPolicyFile(override, root)).not.toThrow();
   });
+
+  it("treats a whitespace-only QBO_POLICY_FILE as unset, like the Python readers", async () => {
+    await write(retired());
+    expect(() => assertNoRetiredPolicyFile({ QBO_POLICY_FILE: "   " }, root)).toThrow(/Writes are blocked/);
+    expect(policyPath({ QBO_POLICY_FILE: "   " })).toBe(defaultPolicyPath());
+  });
+});
+
+// The real write path, run against a copy of src/ so ROOT is a scratch folder
+// and the live connector root is never touched.
+describe("the write path itself", () => {
+  const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src");
+  const MODULES = path.join(SRC, "..", "node_modules");
+
+  async function attempt(env) {
+    await cp(SRC, path.join(root, "src"), { recursive: true });
+    await symlink(MODULES, path.join(root, "node_modules"));
+    await copyFile(path.join(SRC, "..", "package.json"), path.join(root, "package.json"));
+    const script =
+      `import { setCompanyPolicy } from ${JSON.stringify(pathToFileURL(path.join(root, "src", "policy.js")).href)};` +
+      "try { await setCompanyPolicy('acme', { read_only: false }); console.log('WROTE'); }" +
+      " catch (e) { console.log('REFUSED ' + e.message); }";
+    const { stdout } = await execFileP(process.execPath, ["--input-type=module", "--eval", script],
+      { env: { ...process.env, ...env } });
+    return stdout;
+  }
+
+  it.each([
+    { name: "with no override", env: () => ({ QBO_POLICY_FILE: "" }) },
+    { name: "with QBO_POLICY_FILE naming the default file", env: () => ({ QBO_POLICY_FILE: current() }) },
+  ])("refuses a write while a retired file exists, $name", async ({ env }) => {
+    const rules = '{"defaults": {"read_only": true}}\n';
+    await write(current(), rules);
+    await write(retired(), rules);
+    const out = await attempt(env());
+    expect(out).toMatch(/^REFUSED .*Writes are blocked/);
+    expect(await readFile(current(), "utf8")).toBe(rules);
+    expect((await readdir(path.dirname(current()))).filter((n) => n.includes(".bak-"))).toEqual([]);
+  });
+
+  it("writes once the retired file is gone", async () => {
+    await write(current(), '{"defaults": {"read_only": true}}\n');
+    expect(await attempt({ QBO_POLICY_FILE: "" })).toMatch(/^WROTE/);
+  });
 });
 
 describe("pruning policy backups", () => {
@@ -103,6 +151,34 @@ describe("pruning policy backups", () => {
     expect(left).toContain("notes.txt");
     expect(left).toContain("qbo-policy.json");
     expect(await readdir(path.join(path.dirname(current()), "old-backups"))).toEqual(["qbo-policy.json.bak-archived"]);
+  });
+
+  it("breaks equal modification times by name, never by directory order", async () => {
+    await write(current());
+    const when = new Date(Date.UTC(2026, 0, 1));
+    for (const tag of ["b", "d", "a", "c"]) {
+      const file = `${current()}.bak-${tag}`;
+      await write(file);
+      await utimes(file, when, when);
+    }
+    await prunePolicyBackups(current(), 2);
+    expect((await names()).filter((n) => n.includes(".bak-"))).toEqual(["qbo-policy.json.bak-c", "qbo-policy.json.bak-d"]);
+  });
+
+  it("removes only the backup's own name, never a link target", async () => {
+    await write(current());
+    const outside = path.join(root, "protected.txt");
+    const target = path.join(root, "target.txt");
+    await write(outside, "keep me\n");
+    await write(target, "keep me too\n");
+    await link(outside, `${current()}.bak-hardlink`);
+    await symlink(target, `${current()}.bak-symlink`);
+    await prunePolicyBackups(current(), 0);
+    expect(await readFile(outside, "utf8")).toBe("keep me\n");
+    expect(await readFile(target, "utf8")).toBe("keep me too\n");
+    // The hard-linked name goes (it is a regular backup file); the symlink is
+    // not a regular file, so it is left alone entirely.
+    expect((await names()).filter((n) => n.includes(".bak-"))).toEqual(["qbo-policy.json.bak-symlink"]);
   });
 
   it("does nothing at or under the limit, and never throws", async () => {

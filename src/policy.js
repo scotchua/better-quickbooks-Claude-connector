@@ -223,8 +223,10 @@ export function defaultPolicyPath(root = ROOT) {
 // A policy file in the old location means something still writes there, or an
 // install upgraded without moving it. Ignoring it could run a firm with no rules
 // at all, so it blocks writes, as a malformed file does, until it is gone.
+// An override is exempt only when it names somewhere other than the default:
+// pointing QBO_POLICY_FILE at policy/qbo-policy.json is still the default file.
 export function assertNoRetiredPolicyFile(env = process.env, root = ROOT) {
-  if (env.QBO_POLICY_FILE) return;
+  if (overriddenPolicy(env) && policyPath(env) !== defaultPolicyPath(root)) return;
   const retired = path.join(root, "qbo-policy.json");
   if (existsSync(retired)) {
     throw new Error(
@@ -235,8 +237,14 @@ export function assertNoRetiredPolicyFile(env = process.env, root = ROOT) {
   }
 }
 
+// Blank or whitespace-only means unset, as in the Python readers.
+function overriddenPolicy(env) {
+  return (env.QBO_POLICY_FILE ?? "").trim();
+}
+
 export function policyPath(env = process.env) {
-  if (env.QBO_POLICY_FILE) return resolveEnvPath(env.QBO_POLICY_FILE);
+  const override = overriddenPolicy(env);
+  if (override) return resolveEnvPath(override);
   return defaultPolicyPath();
 }
 
@@ -257,7 +265,9 @@ export async function prunePolicyBackups(p, keep = KEEP_POLICY_BACKUPS) {
       const info = await lstat(file);
       if (info.isFile()) found.push({ file, mtime: info.mtimeMs });
     }
-    found.sort((a, b) => b.mtime - a.mtime);
+    // Newest first; equal times fall back to the name, whose timestamp prefix
+    // sorts chronologically, so the result never depends on directory order.
+    found.sort((a, b) => b.mtime - a.mtime || (a.file < b.file ? 1 : a.file > b.file ? -1 : 0));
     for (const { file } of found.slice(keep)) await unlink(file);
   } catch (e) {
     console.error("[qbo-policy]", `could not prune old policy backups in ${dir} (${e.message}); the write itself succeeded.`);
