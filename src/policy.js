@@ -288,7 +288,15 @@ export function policyPath(env = process.env) {
 // hand-edit silently turns every read-only company, amount cap, and date floor
 // in this file into "no restrictions", with nothing anywhere saying so.
 export async function loadPolicy() {
+  const policy = await loadPolicyFile();
+  // Compared after the read, not before: a copy appearing in the other location
+  // between a check and the open would otherwise slip through (Codex review
+  // 20260923T005808Z-132db0, finding 3). One appearing later is caught next time.
   await assertPolicyFilesAgree();
+  return policy;
+}
+
+async function loadPolicyFile() {
   const p = policyPath();
   const forget = () => {
     cache.path = null;
@@ -611,7 +619,6 @@ export function setCompanyPolicy(slug, patch = {}) {
   // guarantee to other connector processes; the promise queue still avoids
   // needless local contention and preserves call order within this process.
   const run = async () => {
-    await assertPolicyFilesAgree();
     const p = policyPath();
     // The default sits in ROOT/policy/, which a fresh checkout does not have,
     // and the lock directory is created beside the file. Owner-only, like the
@@ -619,7 +626,15 @@ export function setCompanyPolicy(slug, patch = {}) {
     // override's, is used exactly as before.
     const dir = path.dirname(p);
     if (!existsSync(dir)) await mkdir(dir, { recursive: true, mode: 0o700 });
-    return withPolicyFileLock(p, () => setCompanyPolicyUnlocked(slug, patch, p));
+    return withPolicyFileLock(p, async () => {
+      // Checked under the lock: two copies that disagree, or a file moved while
+      // this waited, must stop the write rather than edit a file nobody reads.
+      await assertPolicyFilesAgree();
+      if (policyPath() !== p) {
+        throw new Error(`The write-policy file moved from ${p} while this change waited. Nothing was written; try again.`);
+      }
+      return setCompanyPolicyUnlocked(slug, patch, p);
+    });
   };
   const result = policyWriteQueue.then(run, run);
   policyWriteQueue = result.catch(() => {});
