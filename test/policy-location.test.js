@@ -112,6 +112,17 @@ describe("the write path itself", () => {
     expect((await readdir(path.dirname(current()))).filter((n) => n.includes(".bak-"))).toEqual([]);
   });
 
+  it("still refuses when QBO_POLICY_FILE reaches the default file through a symlink", async () => {
+    const rules = '{"defaults": {"read_only": true}}\n';
+    await write(current(), rules);
+    await write(retired(), rules);
+    const alias = path.join(root, "alias");
+    await symlink(path.dirname(current()), alias);
+    const out = await attempt({ QBO_POLICY_FILE: path.join(alias, "qbo-policy.json") });
+    expect(out).toMatch(/^REFUSED .*Writes are blocked/);
+    expect(await readFile(current(), "utf8")).toBe(rules);
+  });
+
   it("writes once the retired file is gone", async () => {
     await write(current(), '{"defaults": {"read_only": true}}\n');
     expect(await attempt({ QBO_POLICY_FILE: "" })).toMatch(/^WROTE/);

@@ -19,7 +19,7 @@
 // strictest value of each rule wins. See policyFor() and the STRICTEST table.
 
 import { readFile, rename, open, unlink, mkdir, readdir, lstat } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -226,7 +226,7 @@ export function defaultPolicyPath(root = ROOT) {
 // An override is exempt only when it names somewhere other than the default:
 // pointing QBO_POLICY_FILE at policy/qbo-policy.json is still the default file.
 export function assertNoRetiredPolicyFile(env = process.env, root = ROOT) {
-  if (overriddenPolicy(env) && policyPath(env) !== defaultPolicyPath(root)) return;
+  if (overriddenPolicy(env) && canonical(policyPath(env)) !== canonical(defaultPolicyPath(root))) return;
   const retired = path.join(root, "qbo-policy.json");
   if (existsSync(retired)) {
     throw new Error(
@@ -234,6 +234,16 @@ export function assertNoRetiredPolicyFile(env = process.env, root = ROOT) {
         `Writes are blocked until it is gone: move it to ${defaultPolicyPath(root)} if that file does not exist yet, ` +
         "otherwise delete whichever copy is wrong."
     );
+  }
+}
+
+// Through symlinks, as Python's Path.resolve does, so a linked path that names
+// the default file is still the default file. A missing path compares as given.
+function canonical(p) {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
   }
 }
 
