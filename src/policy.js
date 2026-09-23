@@ -18,7 +18,7 @@
 // meant to protect, so every slug addressing one realm contributes and the
 // strictest value of each rule wins. See policyFor() and the STRICTEST table.
 
-import { readFile, rename, open, unlink } from "node:fs/promises";
+import { readFile, rename, open, unlink, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -582,8 +582,12 @@ export function setCompanyPolicy(slug, patch = {}) {
   // other company's guardrail. The owner-marker directory lock extends that
   // guarantee to other connector processes; the promise queue still avoids
   // needless local contention and preserves call order within this process.
-  const run = () => {
+  const run = async () => {
     const p = policyPath();
+    // The default sits in ROOT/policy/, which a fresh checkout does not have,
+    // and the lock directory is created beside the file. Owner-only, like the
+    // file itself; an existing directory keeps whatever mode it already has.
+    await mkdir(path.dirname(p), { recursive: true, mode: 0o700 });
     return withPolicyFileLock(p, () => setCompanyPolicyUnlocked(slug, patch, p));
   };
   const result = policyWriteQueue.then(run, run);
