@@ -86,18 +86,31 @@ describe("the write path itself", () => {
   const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src");
   const MODULES = path.join(SRC, "..", "node_modules");
 
-  async function attempt(env) {
+  async function attempt(env, cwd = undefined) {
     await cp(SRC, path.join(root, "src"), { recursive: true });
     await symlink(MODULES, path.join(root, "node_modules"));
     await copyFile(path.join(SRC, "..", "package.json"), path.join(root, "package.json"));
+    // The copy must resolve its own root to the scratch folder, or this test
+    // would be writing to the live connector. Checked before any write.
     const script =
-      `import { setCompanyPolicy } from ${JSON.stringify(pathToFileURL(path.join(root, "src", "policy.js")).href)};` +
+      `import { setCompanyPolicy, defaultPolicyPath } from ${JSON.stringify(pathToFileURL(path.join(root, "src", "policy.js")).href)};` +
+      `if (defaultPolicyPath() !== ${JSON.stringify(current())}) { console.log('WRONG ROOT ' + defaultPolicyPath()); process.exit(0); }` +
       "try { await setCompanyPolicy('acme', { read_only: false }); console.log('WROTE'); }" +
       " catch (e) { console.log('REFUSED ' + e.message); }";
     const { stdout } = await execFileP(process.execPath, ["--input-type=module", "--eval", script],
-      { env: { ...process.env, ...env } });
+      { env: { ...process.env, ...env }, cwd });
     return stdout;
   }
+
+  it("still refuses when a relative QBO_POLICY_FILE names the default file from the connector root", async () => {
+    // A relative override resolves against the working directory in all four
+    // copies; from the connector root it names the default file, so it is checked.
+    const rules = '{"defaults": {"read_only": true}}\n';
+    await write(current(), rules);
+    await write(retired(), rules);
+    const out = await attempt({ QBO_POLICY_FILE: path.join("policy", "qbo-policy.json") }, root);
+    expect(out).toMatch(/^REFUSED .*Writes are blocked/);
+  });
 
   it.each([
     { name: "with no override", env: () => ({ QBO_POLICY_FILE: "" }) },
