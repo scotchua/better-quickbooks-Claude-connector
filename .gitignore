@@ -37,6 +37,8 @@ qbo-policy.*.tmp
 # policy/. It is still a local operating file, not something to commit.
 policy/qbo-policy.json*
 policy/qbo-policy.*.tmp
+# Write leases held by the approved-batch executor (short-lived, local).
+policy/leases/
 
 # Local records (write audit log, CSV import journal)
 audit-log/
