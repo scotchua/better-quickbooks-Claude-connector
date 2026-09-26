@@ -13,12 +13,12 @@ const SLUG = "tool-ergonomics-test";
 const REALM = "765432109876543";
 const TOKEN_FILE = path.join(process.env.QBO_TOKENS_DIR, `tokens.${SLUG}.json`);
 
-function startServer(preload, tempDir, filesDir, writeLog) {
+function startServer(preload, tempDir, filesDir, writeLog, profile = "full") {
   const child = spawn(process.execPath, ["--import", pathToFileURL(preload).href, "src/index.js"], {
     cwd: ROOT,
     env: {
       ...process.env,
-      QBO_TOOL_PROFILE: "full",
+      QBO_TOOL_PROFILE: profile,
       QBO_TOKEN_ENCRYPTION: "off",
       QBO_CLOSED_PERIOD: "off",
       QBO_RETRY_WRITES: "false",
@@ -94,6 +94,7 @@ describe("tool ergonomics at the MCP boundary", () => {
   let filesDir;
   let writeLog;
   let server;
+  let preload;
 
   beforeAll(async () => {
     tempDir = await mkdtemp(path.join(tmpdir(), "qbo-tool-ergonomics-"));
@@ -101,7 +102,7 @@ describe("tool ergonomics at the MCP boundary", () => {
     writeLog = path.join(tempDir, "writes.jsonl");
     await mkdir(filesDir, { recursive: true });
     await writeFile(writeLog, "", { mode: 0o600 });
-    const preload = path.join(tempDir, "mock-qbo-fetch.mjs");
+    preload = path.join(tempDir, "mock-qbo-fetch.mjs");
     await writeFile(preload, `
 import { appendFileSync } from "node:fs";
 const counts = { invoice: 0, bill: 0, batch: 0 };
@@ -149,6 +150,12 @@ globalThis.fetch = async (input, init = {}) => {
     return json({
       Header: { ReportName: "ProfitAndLoss", StartPeriod: "2026-07-01", EndPeriod: "2026-07-31", ReportBasis: "Accrual" },
       Rows: { Row: [{ ColData: [{ value: "Income" }, { value: "125.00" }] }] },
+    });
+  }
+  if (endpoint.startsWith("/reports/CustomerSales")) {
+    return json({
+      Header: { ReportName: "CustomerSales", StartPeriod: "2026-07-01", EndPeriod: "2026-07-31" },
+      Rows: { Row: [{ ColData: [{ value: "Acme Customer" }, { value: "125.00" }] }] },
     });
   }
   if (endpoint.startsWith("/companyinfo/")) {
@@ -387,6 +394,28 @@ globalThis.fetch = async (input, init = {}) => {
     });
     expect(Buffer.from(pdf.content[1].resource.blob, "base64").toString("utf8")).toContain("%PDF-1.7");
   });
+
+  it("exports Sales by Customer under the default core profile", async () => {
+    // The CFO report requires this export, and export_qbo_artifact refuses an
+    // artifact whose inline read tool the profile does not register.
+    const core = startServer(preload, tempDir, filesDir, writeLog, "core");
+    try {
+      await initialize(core);
+      const reportPath = path.join(filesDir, "reports", "customer-sales.json");
+      const exported = await callTool(core, "export_qbo_artifact", {
+        artifact: "sales_by_customer",
+        start_date: "2026-07-01",
+        end_date: "2026-07-31",
+        save_path: reportPath,
+        company: SLUG,
+      });
+      expect(exported.isError).not.toBe(true);
+      expect(exported.body).toMatchObject({ artifact: "sales_by_customer", saved_to: reportPath });
+      expect(JSON.parse(await readFile(reportPath, "utf8"))).toMatchObject({ Header: { ReportName: "CustomerSales" } });
+    } finally {
+      await core.stop();
+    }
+  }, 20_000);
 
   it("redacts attachment credentials from a real tool response", async () => {
     const result = await callTool(server, "api_get", {

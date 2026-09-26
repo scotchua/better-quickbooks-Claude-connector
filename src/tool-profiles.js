@@ -94,6 +94,10 @@ export const TOOL_CAPABILITY_GROUPS = Object.freeze({
     "get_aged_receivables_detail",
     "get_aged_payables_detail",
     "get_recurring_transactions",
+    // Read-only. The MHPE CFO report's normalizer requires the Sales by
+    // Customer report and the CFO agent's puller exports it; without it the
+    // default profile refused that export and every pilot run failed.
+    "get_sales_by_customer",
   ]),
 
   receivables: freezeList([

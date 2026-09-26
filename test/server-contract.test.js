@@ -450,7 +450,9 @@ describe("MCP startup tool profiles", () => {
     // One explicit exporter replaced dozens of mixed read/write report fields;
     // the single extra tool keeps those read contracts honest without adding a
     // separate exporter for every report and PDF.
-    expect(names.length).toBeLessThanOrEqual(61);
+    // 62 since 2026-09-26: get_sales_by_customer (read-only) joined core for
+    // the CFO report's required Sales by Customer input.
+    expect(names.length).toBeLessThanOrEqual(62);
     expect(Buffer.byteLength(JSON.stringify(tools), "utf8")).toBeLessThanOrEqual(100_000);
   }, 20_000);
 

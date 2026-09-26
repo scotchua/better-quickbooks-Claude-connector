@@ -56,12 +56,18 @@ describe("curated tool profiles", () => {
     expect(shouldRegisterTool("api_request")).toBe(false);
     expect(shouldRegisterTool("connect_company")).toBe(false);
     expect(shouldRegisterTool("register_client")).toBe(true);
+    // The CFO report needs Sales by Customer; it is a read, so core carries
+    // it without taking on the bookkeeper profile's voids.
+    expect(shouldRegisterTool("get_sales_by_customer")).toBe(true);
+    expect(shouldRegisterTool("void_invoice")).toBe(false);
     // Naming a client is everyday work; editing that company's write
     // guardrails is not. The default profile must not be able to lift a
     // read_only flag, which it could while both lived in one capability.
     expect(shouldRegisterTool("set_company_policy")).toBe(false);
     const defaultNames = KNOWN_TOOL_NAMES.filter((name) => shouldRegisterTool(name));
-    expect(defaultNames.length).toBeLessThanOrEqual(61);
+    // 62 since 2026-09-26: get_sales_by_customer (read-only) joined core for
+    // the CFO report's required Sales by Customer input.
+    expect(defaultNames.length).toBeLessThanOrEqual(62);
   });
 
   it("carries the read-only tools the close-review prompts require", () => {
