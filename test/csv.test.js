@@ -91,6 +91,13 @@ describe("planImport", () => {
     expect(plan.outflows).toEqual([{ row: 2, date: "2026-01-02", description: "RENT", amount: 1500 }]);
     expect(plan.inflows[0].amount).toBe(75);
   });
+  it("reports rows with amounts in both Debit and Credit without changing single-sided rows", () => {
+    const rows = parseCSV("Date,Description,Debit,Credit\n1/2/26,RENT,10,\n1/3/26,REFUND,,8\n1/4/26,AMBIGUOUS,10,8");
+    const plan = planImport(rows);
+    expect(plan.outflows).toEqual([{ row: 2, date: "2026-01-02", description: "RENT", amount: 10 }]);
+    expect(plan.inflows).toEqual([{ row: 3, date: "2026-01-03", description: "REFUND", amount: 8 }]);
+    expect(plan.errors).toEqual([{ row: 4, reason: expect.stringMatching(/Debit.*Credit/) }]);
+  });
   it("collects row errors instead of importing garbage", () => {
     const rows = parseCSV("Date,Description,Amount\nnotadate,X,5\n1/5/26,Y,zzz");
     const plan = planImport(rows);

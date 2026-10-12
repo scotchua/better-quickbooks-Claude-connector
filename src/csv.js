@@ -135,6 +135,10 @@ export function planImport(rows, { amountConvention = "negative_out" } = {}) {
         errors.push({ row: i + 1, reason: "No amount in Debit or Credit column" });
         continue;
       }
+      if (!Number.isNaN(debit) && debit !== 0 && !Number.isNaN(credit) && credit !== 0) {
+        errors.push({ row: i + 1, reason: "Amounts in both Debit and Credit columns" });
+        continue;
+      }
       signed = !Number.isNaN(debit) && debit !== 0 ? -Math.abs(debit) : Math.abs(credit || 0);
     } else {
       const amt = parseAmount(r[amountIdx]);
