@@ -38,6 +38,7 @@ export function parseCSV(text) {
       if (field !== "" || row.length) { row.push(field); rows.push(row); row = []; field = ""; }
     } else field += c;
   }
+  if (inQ) throw new Error("Unterminated quoted CSV field at end of file; add the missing closing double quote.");
   if (field !== "" || row.length) { row.push(field); rows.push(row); }
   if (rows[0]?.[0]) rows[0][0] = rows[0][0].replace(/^﻿/, "");
   return rows;
