@@ -112,14 +112,18 @@ export function matchTransactions(statementRows, registerRows, { toleranceDays =
   const statementsByAmount = new Map();
   const registersByAmount = new Map();
   statementRows.forEach((row, index) => {
+    const ms = toMs(row.date);
+    if (Number.isNaN(ms)) throw new Error(`Reconciliation error: invalid statement date at row ${index + 1}: "${row.date}".`);
     const key = amountKey(row);
     if (!statementsByAmount.has(key)) statementsByAmount.set(key, []);
-    statementsByAmount.get(key).push({ row, index, ms: toMs(row.date) });
+    statementsByAmount.get(key).push({ row, index, ms });
   });
   registerRows.forEach((row, index) => {
+    const ms = toMs(row.date);
+    if (Number.isNaN(ms)) throw new Error(`Reconciliation error: invalid register date at row ${index + 1}: "${row.date}".`);
     const key = amountKey(row);
     if (!registersByAmount.has(key)) registersByAmount.set(key, []);
-    registersByAmount.get(key).push({ row, index, ms: toMs(row.date) });
+    registersByAmount.get(key).push({ row, index, ms });
   });
 
   const matchedByStatement = new Map();

@@ -13,6 +13,21 @@ describe("matchTransactions", () => {
     { id: "b", date: "2026-07-20", amount: 20 },
     { id: "c", date: "2026-07-10", amount: 99 },
   ];
+  const malformedStatement = { row: 8, date: "2026-07-XX", amount: 40 };
+  const malformedRegister = { id: "bad-date", date: "2026-13-01", amount: 40 };
+
+  it("raises a reconciliation error for an invalid statement date", () => {
+    expect(() => matchTransactions([malformedStatement], [])).toThrow(
+      'Reconciliation error: invalid statement date at row 1: "2026-07-XX".'
+    );
+  });
+
+  it("raises a reconciliation error for an invalid register date", () => {
+    expect(() => matchTransactions([], [malformedRegister])).toThrow(
+      'Reconciliation error: invalid register date at row 1: "2026-13-01".'
+    );
+  });
+
   it("matches on amount within the date tolerance", () => {
     const out = matchTransactions(stmt, reg, { toleranceDays: 2 });
     expect(out.matched).toHaveLength(1);
