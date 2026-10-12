@@ -105,6 +105,20 @@ export function planInvoiceAllocations({ allocations, invoices, total, customerI
 // Underpaying is allowed (a partial payment); overpaying is refused.
 export function planBillPaymentApplication({ bills, credits, amount }) {
   const errors = [];
+  const seenBills = new Set();
+  const seenCredits = new Set();
+  for (const b of bills || []) {
+    const id = String(b.Id);
+    if (seenBills.has(id)) errors.push(`Bill ${id} is listed twice; list each bill only once.`);
+    seenBills.add(id);
+  }
+  for (const cr of credits || []) {
+    const id = String(cr.Id);
+    if (seenCredits.has(id)) errors.push(`Vendor credit ${id} is listed twice; list each credit only once.`);
+    seenCredits.add(id);
+  }
+  if (errors.length) raise(errors);
+
   const cash = money(amount);
 
   const creditPlan = [];

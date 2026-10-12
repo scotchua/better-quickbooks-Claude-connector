@@ -122,6 +122,31 @@ describe("planBillPaymentApplication", () => {
     expect(out.bills.map((b) => b.applying)).toEqual([100, 50]);
   });
 
+  it("refuses a repeated bill instead of linking it twice", () => {
+    expect(() => planBillPaymentApplication({
+      bills: [bill("9001", 100), bill("9001", 100)], credits: [], amount: 150,
+    })).toThrow(/Bill 9001 is listed twice/);
+  });
+
+  it("refuses a repeated vendor credit instead of counting it twice", () => {
+    expect(() => planBillPaymentApplication({
+      bills: [bill("9002", 200)], credits: [credit("9003", 50), credit("9003", 50)], amount: 100,
+    })).toThrow(/Vendor credit 9003 is listed twice/);
+  });
+
+  it("keeps unique bill and credit totals and line order", () => {
+    const out = planBillPaymentApplication({
+      bills: [bill("9004", 100), bill("9005", 200)], credits: [credit("9006", 40), credit("9007", 10)], amount: 150,
+    });
+    expect(out).toMatchObject({ cash_paid: 150, credits_applied: 50, total_settled: 200 });
+    expect(out.lines).toEqual([
+      { Amount: 100, LinkedTxn: [{ TxnId: "9004", TxnType: "Bill" }] },
+      { Amount: 100, LinkedTxn: [{ TxnId: "9005", TxnType: "Bill" }] },
+      { Amount: 40, LinkedTxn: [{ TxnId: "9006", TxnType: "VendorCredit" }] },
+      { Amount: 10, LinkedTxn: [{ TxnId: "9007", TxnType: "VendorCredit" }] },
+    ]);
+  });
+
   it("rejects a credit with nothing left on it", () => {
     expect(() => planBillPaymentApplication({
       bills: [bill("149", 500)], credits: [credit("150", 0)], amount: 100,
