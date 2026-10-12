@@ -241,7 +241,7 @@ export function matchTransactions(statementRows, registerRows, { toleranceDays =
 export function findDuplicateGroups(rows, { dateWindowDays = 3 } = {}) {
   const byKey = new Map();
   for (const r of rows) {
-    if (r.amount == null || !r.date) continue;
+    if (r.amount == null || !r.date || !String(r.party ?? "").trim()) continue;
     const key = `${r.party ?? ""}|${Number(r.amount).toFixed(2)}`;
     if (!byKey.has(key)) byKey.set(key, []);
     byKey.get(key).push(r);

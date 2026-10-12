@@ -125,6 +125,19 @@ describe("findDuplicateGroups", () => {
     ]);
     expect(groups).toHaveLength(0);
   });
+  it("does not group purchases with missing parties by date and amount alone", () => {
+    const rows = [
+      { id: "unknown-1", party: null, amount: 42, date: "2026-09-10" },
+      { id: "unknown-2", amount: 42, date: "2026-09-10" },
+      { id: "unknown-3", party: "", amount: 42, date: "2026-09-10" },
+      { id: "unknown-4", party: "   ", amount: 42, date: "2026-09-10" },
+      { id: "named-1", party: "Invented Market", amount: 42, date: "2026-09-10" },
+      { id: "named-2", party: "Invented Market", amount: 42, date: "2026-09-11" },
+      { id: "other-party", party: "Invented Books", amount: 42, date: "2026-09-10" },
+    ];
+    const groups = findDuplicateGroups(rows);
+    expect(groups.map((group) => group.map((row) => row.id))).toEqual([["named-1", "named-2"]]);
+  });
 });
 
 // Shaped after a real account-filtered GeneralLedger response: eight columns,
