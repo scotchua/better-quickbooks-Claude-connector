@@ -50,6 +50,60 @@ describe("matchTransactions", () => {
     expect(out.register_only).toEqual([]);
     expect(out.matched.every((m) => m.ambiguous)).toBe(true);
   });
+  it("repeats the small-case matches without a full direction matrix", () => {
+    const date = (day) => new Date(Date.UTC(2026, 0, 1 + day)).toISOString().slice(0, 10);
+    const fixture = (groups) => {
+      const statements = [];
+      const registers = [];
+      for (let group = 0; group < groups; group++) {
+        [0, 1, 2, 3].forEach((offset, index) =>
+          statements.push({ id: `${group}:s${index}`, date: date(group * 10 + offset), amount: 42 })
+        );
+        [0, 2, 2].forEach((offset, index) =>
+          registers.push({ id: `${group}:r${index}`, date: date(group * 10 + offset), amount: 42 })
+        );
+      }
+      return [statements, registers];
+    };
+    const pairs = (out) => out.matched.map((match) => [
+      match.statement.id, match.register.id, match.date_diff_days, match.ambiguous,
+    ]);
+    const small = matchTransactions(...fixture(1), { toleranceDays: 1 });
+    expect(pairs(small)).toEqual([
+      ["0:s0", "0:r0", 0, true],
+      ["0:s2", "0:r1", 0, true],
+      ["0:s3", "0:r2", 1, true],
+    ]);
+    expect(small.statement_only.map((row) => row.id)).toEqual(["0:s1"]);
+
+    const NativeUint8Array = globalThis.Uint8Array;
+    let largestAllocation = 0;
+    globalThis.Uint8Array = class extends NativeUint8Array {
+      constructor(length) {
+        if (typeof length === "number") {
+          largestAllocation = Math.max(largestAllocation, length);
+          if (length > 32768) throw new Error(`direction allocation too large: ${length}`);
+        }
+        super(length);
+      }
+    };
+    let large;
+    try {
+      large = matchTransactions(...fixture(128), { toleranceDays: 1 });
+    } finally {
+      globalThis.Uint8Array = NativeUint8Array;
+    }
+    expect(largestAllocation).toBeLessThanOrEqual(32768);
+    expect(pairs(large)).toEqual(Array.from({ length: 128 }, (_, group) =>
+      pairs(small).map(([statement, register, days, ambiguous]) => [
+        `${group}:${statement.slice(2)}`, `${group}:${register.slice(2)}`, days, ambiguous,
+      ])
+    ).flat());
+    expect(large.statement_only.map((row) => row.id)).toEqual(
+      Array.from({ length: 128 }, (_, group) => `${group}:s1`)
+    );
+    expect(large.register_only).toEqual([]);
+  });
 });
 
 describe("findDuplicateGroups", () => {
