@@ -13,6 +13,21 @@ describe("matchTransactions", () => {
     { id: "b", date: "2026-07-20", amount: 20 },
     { id: "c", date: "2026-07-10", amount: 99 },
   ];
+  const malformedStatement = { row: 8, date: "2026-07-XX", amount: 40 };
+  const malformedRegister = { id: "bad-date", date: "2026-13-01", amount: 40 };
+
+  it("raises a reconciliation error for an invalid statement date", () => {
+    expect(() => matchTransactions([malformedStatement], [])).toThrow(
+      'Reconciliation error: invalid statement date at row 1: "2026-07-XX".'
+    );
+  });
+
+  it("raises a reconciliation error for an invalid register date", () => {
+    expect(() => matchTransactions([], [malformedRegister])).toThrow(
+      'Reconciliation error: invalid register date at row 1: "2026-13-01".'
+    );
+  });
+
   it("matches on amount within the date tolerance", () => {
     const out = matchTransactions(stmt, reg, { toleranceDays: 2 });
     expect(out.matched).toHaveLength(1);
@@ -50,6 +65,60 @@ describe("matchTransactions", () => {
     expect(out.register_only).toEqual([]);
     expect(out.matched.every((m) => m.ambiguous)).toBe(true);
   });
+  it("repeats the small-case matches without a full direction matrix", () => {
+    const date = (day) => new Date(Date.UTC(2026, 0, 1 + day)).toISOString().slice(0, 10);
+    const fixture = (groups) => {
+      const statements = [];
+      const registers = [];
+      for (let group = 0; group < groups; group++) {
+        [0, 1, 2, 3].forEach((offset, index) =>
+          statements.push({ id: `${group}:s${index}`, date: date(group * 10 + offset), amount: 42 })
+        );
+        [0, 2, 2].forEach((offset, index) =>
+          registers.push({ id: `${group}:r${index}`, date: date(group * 10 + offset), amount: 42 })
+        );
+      }
+      return [statements, registers];
+    };
+    const pairs = (out) => out.matched.map((match) => [
+      match.statement.id, match.register.id, match.date_diff_days, match.ambiguous,
+    ]);
+    const small = matchTransactions(...fixture(1), { toleranceDays: 1 });
+    expect(pairs(small)).toEqual([
+      ["0:s0", "0:r0", 0, true],
+      ["0:s2", "0:r1", 0, true],
+      ["0:s3", "0:r2", 1, true],
+    ]);
+    expect(small.statement_only.map((row) => row.id)).toEqual(["0:s1"]);
+
+    const NativeUint8Array = globalThis.Uint8Array;
+    let largestAllocation = 0;
+    globalThis.Uint8Array = class extends NativeUint8Array {
+      constructor(length) {
+        if (typeof length === "number") {
+          largestAllocation = Math.max(largestAllocation, length);
+          if (length > 32768) throw new Error(`direction allocation too large: ${length}`);
+        }
+        super(length);
+      }
+    };
+    let large;
+    try {
+      large = matchTransactions(...fixture(128), { toleranceDays: 1 });
+    } finally {
+      globalThis.Uint8Array = NativeUint8Array;
+    }
+    expect(largestAllocation).toBeLessThanOrEqual(32768);
+    expect(pairs(large)).toEqual(Array.from({ length: 128 }, (_, group) =>
+      pairs(small).map(([statement, register, days, ambiguous]) => [
+        `${group}:${statement.slice(2)}`, `${group}:${register.slice(2)}`, days, ambiguous,
+      ])
+    ).flat());
+    expect(large.statement_only.map((row) => row.id)).toEqual(
+      Array.from({ length: 128 }, (_, group) => `${group}:s1`)
+    );
+    expect(large.register_only).toEqual([]);
+  });
 });
 
 describe("findDuplicateGroups", () => {
@@ -70,6 +139,19 @@ describe("findDuplicateGroups", () => {
       { id: "2", party: "A", amount: 100.5, date: "2026-07-01" },
     ]);
     expect(groups).toHaveLength(0);
+  });
+  it("does not group purchases with missing parties by date and amount alone", () => {
+    const rows = [
+      { id: "unknown-1", party: null, amount: 42, date: "2026-09-10" },
+      { id: "unknown-2", amount: 42, date: "2026-09-10" },
+      { id: "unknown-3", party: "", amount: 42, date: "2026-09-10" },
+      { id: "unknown-4", party: "   ", amount: 42, date: "2026-09-10" },
+      { id: "named-1", party: "Invented Market", amount: 42, date: "2026-09-10" },
+      { id: "named-2", party: "Invented Market", amount: 42, date: "2026-09-11" },
+      { id: "other-party", party: "Invented Books", amount: 42, date: "2026-09-10" },
+    ];
+    const groups = findDuplicateGroups(rows);
+    expect(groups.map((group) => group.map((row) => row.id))).toEqual([["named-1", "named-2"]]);
   });
 });
 

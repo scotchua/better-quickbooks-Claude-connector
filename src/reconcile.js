@@ -112,14 +112,18 @@ export function matchTransactions(statementRows, registerRows, { toleranceDays =
   const statementsByAmount = new Map();
   const registersByAmount = new Map();
   statementRows.forEach((row, index) => {
+    const ms = toMs(row.date);
+    if (Number.isNaN(ms)) throw new Error(`Reconciliation error: invalid statement date at row ${index + 1}: "${row.date}".`);
     const key = amountKey(row);
     if (!statementsByAmount.has(key)) statementsByAmount.set(key, []);
-    statementsByAmount.get(key).push({ row, index, ms: toMs(row.date) });
+    statementsByAmount.get(key).push({ row, index, ms });
   });
   registerRows.forEach((row, index) => {
+    const ms = toMs(row.date);
+    if (Number.isNaN(ms)) throw new Error(`Reconciliation error: invalid register date at row ${index + 1}: "${row.date}".`);
     const key = amountKey(row);
     if (!registersByAmount.has(key)) registersByAmount.set(key, []);
-    registersByAmount.get(key).push({ row, index, ms: toMs(row.date) });
+    registersByAmount.get(key).push({ row, index, ms });
   });
 
   const matchedByStatement = new Map();
@@ -134,21 +138,23 @@ export function matchTransactions(statementRows, registerRows, { toleranceDays =
     const n = statements.length;
     const m = registers.length;
     const width = m + 1;
-    const directions = new Uint8Array((n + 1) * width); // 1=up, 2=left, 3=match
+    // Keep score checkpoints; rebuild one direction block at a time for traceback.
+    const blockSize = Math.ceil(Math.sqrt(n));
     let prevCount = new Int32Array(width);
     let prevCost = new Float64Array(width);
+    const checkpoints = [[prevCount, prevCost]];
 
     const better = (countA, costA, countB, costB) =>
       countA > countB || (countA === countB && costA < costB);
 
-    for (let i = 1; i <= n; i++) {
+    const scoreRow = (i, priorCount, priorCost, directions, blockStart) => {
       const count = new Int32Array(width);
       const cost = new Float64Array(width);
-      directions[i * width] = 1;
+      if (directions) directions[(i - blockStart) * width] = 1;
       for (let j = 1; j <= m; j++) {
         // Skip the current statement row.
-        let bestCount = prevCount[j];
-        let bestCost = prevCost[j];
+        let bestCount = priorCount[j];
+        let bestCost = priorCost[j];
         let direction = 1;
         // Or skip the current register row.
         if (better(count[j - 1], cost[j - 1], bestCount, bestCost)) {
@@ -159,8 +165,8 @@ export function matchTransactions(statementRows, registerRows, { toleranceDays =
         const diff = Math.abs(statements[i - 1].ms - registers[j - 1].ms);
         const amountDiff = Math.abs((Number(statements[i - 1].row.amount) || 0) - (Number(registers[j - 1].row.amount) || 0));
         if (amountDiff <= 0.005 && Number.isFinite(diff) && diff <= maxDiff) {
-          const matchCount = prevCount[j - 1] + 1;
-          const matchCost = prevCost[j - 1] + diff;
+          const matchCount = priorCount[j - 1] + 1;
+          const matchCost = priorCost[j - 1] + diff;
           // Prefer a match on an exact tie for deterministic, intuitive output.
           if (better(matchCount, matchCost, bestCount, bestCost) ||
               (matchCount === bestCount && matchCost === bestCost)) {
@@ -171,41 +177,53 @@ export function matchTransactions(statementRows, registerRows, { toleranceDays =
         }
         count[j] = bestCount;
         cost[j] = bestCost;
-        directions[i * width + j] = direction;
+        if (directions) directions[(i - blockStart) * width + j] = direction;
       }
-      prevCount = count;
-      prevCost = cost;
+      return [count, cost];
+    };
+
+    for (let i = 1; i <= n; i++) {
+      [prevCount, prevCost] = scoreRow(i, prevCount, prevCost);
+      if (i % blockSize === 0 && i < n) checkpoints.push([prevCount, prevCost]);
     }
 
     let i = n;
     let j = m;
     while (i > 0 && j > 0) {
-      const direction = directions[i * width + j];
-      if (direction === 3) {
-        const s = statements[i - 1];
-        const q = registers[j - 1];
-        const diff = Math.abs(s.ms - q.ms);
-        const statementCandidates = registers.filter((candidate) =>
-          Math.abs((Number(s.row.amount) || 0) - (Number(candidate.row.amount) || 0)) <= 0.005 &&
-          Math.abs(s.ms - candidate.ms) <= maxDiff
-        ).length;
-        const registerCandidates = statements.filter((candidate) =>
-          Math.abs((Number(candidate.row.amount) || 0) - (Number(q.row.amount) || 0)) <= 0.005 &&
-          Math.abs(candidate.ms - q.ms) <= maxDiff
-        ).length;
-        matchedByStatement.set(s.index, {
-          statement: s.row,
-          register: q.row,
-          date_diff_days: Math.round(diff / DAY_MS),
-          ambiguous: statementCandidates > 1 || registerCandidates > 1,
-        });
-        usedRegisters.add(q.index);
-        i--;
-        j--;
-      } else if (direction === 2) {
-        j--;
-      } else {
-        i--;
+      const blockStart = Math.floor((i - 1) / blockSize) * blockSize;
+      const directions = new Uint8Array((i - blockStart + 1) * width); // 1=up, 2=left, 3=match
+      let [count, cost] = checkpoints[blockStart / blockSize];
+      for (let row = blockStart + 1; row <= i; row++) {
+        [count, cost] = scoreRow(row, count, cost, directions, blockStart);
+      }
+      while (i > blockStart && j > 0) {
+        const direction = directions[(i - blockStart) * width + j];
+        if (direction === 3) {
+          const s = statements[i - 1];
+          const q = registers[j - 1];
+          const diff = Math.abs(s.ms - q.ms);
+          const statementCandidates = registers.filter((candidate) =>
+            Math.abs((Number(s.row.amount) || 0) - (Number(candidate.row.amount) || 0)) <= 0.005 &&
+            Math.abs(s.ms - candidate.ms) <= maxDiff
+          ).length;
+          const registerCandidates = statements.filter((candidate) =>
+            Math.abs((Number(candidate.row.amount) || 0) - (Number(q.row.amount) || 0)) <= 0.005 &&
+            Math.abs(candidate.ms - q.ms) <= maxDiff
+          ).length;
+          matchedByStatement.set(s.index, {
+            statement: s.row,
+            register: q.row,
+            date_diff_days: Math.round(diff / DAY_MS),
+            ambiguous: statementCandidates > 1 || registerCandidates > 1,
+          });
+          usedRegisters.add(q.index);
+          i--;
+          j--;
+        } else if (direction === 2) {
+          j--;
+        } else {
+          i--;
+        }
       }
     }
   }
@@ -227,7 +245,7 @@ export function matchTransactions(statementRows, registerRows, { toleranceDays =
 export function findDuplicateGroups(rows, { dateWindowDays = 3 } = {}) {
   const byKey = new Map();
   for (const r of rows) {
-    if (r.amount == null || !r.date) continue;
+    if (r.amount == null || !r.date || !String(r.party ?? "").trim()) continue;
     const key = `${r.party ?? ""}|${Number(r.amount).toFixed(2)}`;
     if (!byKey.has(key)) byKey.set(key, []);
     byKey.get(key).push(r);

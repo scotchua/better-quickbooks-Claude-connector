@@ -38,6 +38,7 @@ export function parseCSV(text) {
       if (field !== "" || row.length) { row.push(field); rows.push(row); row = []; field = ""; }
     } else field += c;
   }
+  if (inQ) throw new Error("Unterminated quoted CSV field at end of file; add the missing closing double quote.");
   if (field !== "" || row.length) { row.push(field); rows.push(row); }
   if (rows[0]?.[0]) rows[0][0] = rows[0][0].replace(/^﻿/, "");
   return rows;
@@ -133,6 +134,10 @@ export function planImport(rows, { amountConvention = "negative_out" } = {}) {
       const credit = parseAmount(r[creditIdx]);
       if (Number.isNaN(debit) && Number.isNaN(credit)) {
         errors.push({ row: i + 1, reason: "No amount in Debit or Credit column" });
+        continue;
+      }
+      if (!Number.isNaN(debit) && debit !== 0 && !Number.isNaN(credit) && credit !== 0) {
+        errors.push({ row: i + 1, reason: "Amounts in both Debit and Credit columns" });
         continue;
       }
       signed = !Number.isNaN(debit) && debit !== 0 ? -Math.abs(debit) : Math.abs(credit || 0);

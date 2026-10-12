@@ -24,6 +24,8 @@ import {
 } from "../src/csv.js";
 
 describe("parseCSV", () => {
+  const multilineCSV = 'Date,Amount,Description\n1/2/26,-4.50,"Fictional\nBookshop"\n1/3/26,-7.25,"Imaginary\nCafe';
+
   it("handles quoted fields with commas and escaped quotes", () => {
     const rows = parseCSV('a,"b,c","say ""hi"""\n1,2,3');
     expect(rows).toEqual([["a", "b,c", 'say "hi"'], ["1", "2", "3"]]);
@@ -37,6 +39,16 @@ describe("parseCSV", () => {
   });
   it("keeps newlines inside quoted fields", () => {
     expect(parseCSV('"line1\nline2",x')).toEqual([["line1\nline2", "x"]]);
+  });
+  it("rejects an unterminated multiline field before planning", () => {
+    expect(() => planImport(parseCSV(multilineCSV))).toThrow(/Unterminated quoted CSV field.*closing double quote/);
+  });
+  it("parses the completed multiline fixture", () => {
+    expect(parseCSV(multilineCSV + '"')).toEqual([
+      ["Date", "Amount", "Description"],
+      ["1/2/26", "-4.50", "Fictional\nBookshop"],
+      ["1/3/26", "-7.25", "Imaginary\nCafe"],
+    ]);
   });
 });
 
@@ -90,6 +102,13 @@ describe("planImport", () => {
     const plan = planImport(rows);
     expect(plan.outflows).toEqual([{ row: 2, date: "2026-01-02", description: "RENT", amount: 1500 }]);
     expect(plan.inflows[0].amount).toBe(75);
+  });
+  it("reports rows with amounts in both Debit and Credit without changing single-sided rows", () => {
+    const rows = parseCSV("Date,Description,Debit,Credit\n1/2/26,RENT,10,\n1/3/26,REFUND,,8\n1/4/26,AMBIGUOUS,10,8");
+    const plan = planImport(rows);
+    expect(plan.outflows).toEqual([{ row: 2, date: "2026-01-02", description: "RENT", amount: 10 }]);
+    expect(plan.inflows).toEqual([{ row: 3, date: "2026-01-03", description: "REFUND", amount: 8 }]);
+    expect(plan.errors).toEqual([{ row: 4, reason: expect.stringMatching(/Debit.*Credit/) }]);
   });
   it("collects row errors instead of importing garbage", () => {
     const rows = parseCSV("Date,Description,Amount\nnotadate,X,5\n1/5/26,Y,zzz");
