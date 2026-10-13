@@ -55,6 +55,23 @@ describe("extractLinks", () => {
   it("coerces numeric ids to strings so they compare cleanly", () => {
     expect(extractLinks({ LinkedTxn: [{ TxnId: 145, TxnType: "Invoice" }] })[0].txn_id).toBe("145");
   });
+
+  it("keeps types separate and normalizes string and zero applied amounts", () => {
+    const links = extractLinks({
+      LinkedTxn: [
+        { TxnId: "42", TxnType: "Invoice" },
+        { TxnId: "42", TxnType: "CreditMemo" },
+      ],
+      Line: [
+        { Amount: "12.50", LinkedTxn: [{ TxnId: "42", TxnType: "Invoice" }] },
+        { Amount: 0, LinkedTxn: [{ TxnId: "42", TxnType: "CreditMemo" }] },
+      ],
+    });
+    expect(links).toEqual([
+      { txn_type: "Invoice", txn_id: "42", amount_applied: 12.5, on_line: 1 },
+      { txn_type: "CreditMemo", txn_id: "42", amount_applied: 0, on_line: 2 },
+    ]);
+  });
 });
 
 describe("summarizeTxn", () => {
@@ -69,6 +86,21 @@ describe("summarizeTxn", () => {
   });
   it("returns null for nothing", () => {
     expect(summarizeTxn(null)).toBeNull();
+  });
+
+  it("keeps populated document fields, zero totals, entity names, and notes", () => {
+    expect(summarizeTxn({
+      Id: "91", TxnDate: "2025-03-14", DocNumber: "R-9", TotalAmt: 0, Balance: 0,
+      EntityRef: { name: "Copper Finch LLC" }, PrivateNote: "Quarterly test",
+    })).toEqual({
+      id: "91", date: "2025-03-14", doc_number: "R-9", total: 0,
+      balance: 0, party: "Copper Finch LLC", memo: "Quarterly test",
+    });
+  });
+
+  it("uses reference values when customer and vendor names are absent", () => {
+    expect(summarizeTxn({ CustomerRef: { value: "customer-7" } }).party).toBe("customer-7");
+    expect(summarizeTxn({ VendorRef: { value: "vendor-8" } }).party).toBe("vendor-8");
   });
 });
 
@@ -86,6 +118,17 @@ describe("describeChain", () => {
 
   it("is explicit about an unlinked transaction", () => {
     expect(describeChain("Invoice", { id: "200" }, [])).toBe("Invoice 200 is not linked to any other transaction.");
+  });
+
+  it("describes mixed link types and only the available applied amounts", () => {
+    const links = [
+      { txn_type: "Invoice", amount_applied: 0 },
+      { txn_type: "Bill", amount_applied: 12.5 },
+      { txn_type: "Invoice" },
+    ];
+    expect(describeChain("Payment", { id: "91" }, links)).toBe(
+      "Payment 91 is linked to 2 Invoices, 1 Bill. Of those, the amounts it applies total 12.50.",
+    );
   });
 });
 

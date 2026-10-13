@@ -13,6 +13,7 @@ import {
   rowMarker,
   parseRowMarker,
   readJournal,
+  postedRows,
   unconfirmedRows,
   recordPreviewed,
   recordIntent,
@@ -80,6 +81,9 @@ describe("normalizeDate", () => {
     expect(normalizeDate("July 4")).toBeNull();
     expect(normalizeDate("13/40/2026")).toBeNull();
     expect(normalizeDate("")).toBeNull();
+  });
+  it("accepts a valid December date", () => {
+    expect(normalizeDate("12/31/2026")).toBe("2026-12-31");
   });
 });
 
@@ -179,6 +183,21 @@ describe("import identity", () => {
     ];
     for (const variant of variants) expect(previewPlanHash(variant)).not.toBe(expected);
   });
+
+  it("rejects a zero amount in a preview fingerprint", () => {
+    expect(() => previewPlanHash({
+      company: "Juniper Works",
+      bankAccount: "731",
+      fileBytes: Buffer.from("Date,Description,Amount\n12/3/26,Paper,-6.25\n"),
+      plannedRows: [{
+        row: 2,
+        date: "2026-12-03",
+        amount: 0,
+        description: "Paper",
+        category_id: "204",
+      }],
+    })).toThrow(/invalid amount/);
+  });
 });
 
 // The journal is what stops a re-run from double-posting. The dangerous window
@@ -202,6 +221,11 @@ describe("import journal", () => {
     expect([...j.posted]).toEqual([]);
     expect([...j.rejected]).toEqual([]);
     expect([...unconfirmedRows(j)]).toEqual([]);
+  });
+
+  it("returns the posted row set for an import", async () => {
+    await recordPosted("cafe731", [{ row: 4, purchase_id: "901" }]);
+    expect([...await postedRows("cafe731")]).toEqual([4]);
   });
 
   it("records a dry run so a live import can require one", async () => {
@@ -263,6 +287,13 @@ describe("import journal", () => {
     expect([...journal.posted]).toEqual([2]);
     expect([...journal.rejected]).toEqual([3]);
     expect([...unconfirmedRows(journal)]).toEqual([]);
+  });
+
+  it("records a batch with only one kind of terminal outcome", async () => {
+    await recordBatchOutcomes("works731", { posted: [{ row: 2, purchase_id: "902" }] });
+    await recordBatchOutcomes("works732", { rejected: [{ row: 3, error: "Imaginary account" }] });
+    expect([...(await readJournal("works731")).posted]).toEqual([2]);
+    expect([...(await readJournal("works732")).rejected]).toEqual([3]);
   });
 
   it("keeps a confirmed posting terminal even if a legacy concurrent intent was appended later", async () => {

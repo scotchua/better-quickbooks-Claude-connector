@@ -52,6 +52,11 @@ function doctor() {
 }
 
 describe("filesystem environment paths", () => {
+  it("uses the default export subdirectory for an empty company slug", () => {
+    vi.stubEnv("QBO_FILES_DIR", directory);
+    expect(defaultExportPath("", "report.csv")).toBe(path.join(directory, "exports", "default", "report.csv"));
+  });
+
   it.each(paths)("preserves the base-commit default for unset %s", (name, resolve, expected) => {
     vi.stubEnv(name, undefined);
     expect(resolve()).toBe(expected);
