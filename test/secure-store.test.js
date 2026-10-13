@@ -63,9 +63,46 @@ describe("secure token store", () => {
     expect(isEncrypted(sample)).toBe(false);
     expect(isEncrypted(null)).toBe(false);
   });
+
+  it("uses a 12-byte GCM nonce", async () => {
+    const encrypted = await encryptTokens({ realmId: "730018", access_token: "invented-token" });
+    expect(Buffer.from(encrypted.enc.iv, "base64")).toHaveLength(12);
+  });
+
+  it("rejects an unsupported encryption algorithm", async () => {
+    const encrypted = await encryptTokens({ realmId: "730019", access_token: "invented-token" });
+    encrypted.enc.alg = "invented-cipher";
+    await expect(decryptTokens(encrypted)).rejects.toThrow(/unsupported token encryption algorithm/i);
+  });
 });
 
 describe("key provider fail-closed behavior", () => {
+  it("returns null for a missing file when creation is disabled", async () => {
+    const read = vi.fn(async () => { throw fsError("ENOENT"); });
+    expect(await __test.keyFromFile({ keyFile: "/invented/key", read, createIfMissing: false })).toBe(null);
+  });
+
+  it("uses an existing valid file key without publishing another", async () => {
+    const key = Buffer.alloc(32, 0x53);
+    const read = vi.fn(async () => key.toString("hex"));
+    const publish = vi.fn();
+    expect(await __test.keyFromFile({ keyFile: "/invented/key", read, publish })).toEqual(key);
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it("generates a 32-byte file key", async () => {
+    const read = vi.fn(async () => { throw fsError("ENOENT"); });
+    const publish = vi.fn(async () => ({ created: true }));
+    const key = await __test.keyFromFile({
+      keyFile: "/invented/key",
+      read,
+      publish,
+      random: (size) => Buffer.alloc(size, 0x54),
+    });
+    expect(key).toHaveLength(32);
+    expect(publish).toHaveBeenCalledOnce();
+  });
+
   it("creates a missing file key exclusively and gives concurrent callers the same key", async () => {
     await withTempDir(async (dir) => {
       const keyFile = path.join(dir, "key");
@@ -253,6 +290,57 @@ describe("key provider fail-closed behavior", () => {
     expect(finds).toBe(2);
   });
 
+  it("recognizes a code-only Keychain duplicate error", async () => {
+    const winner = Buffer.alloc(32, 0x55);
+    let finds = 0;
+    const security = vi.fn(async (args) => {
+      if (args[0] === "find-generic-password") {
+        if (++finds === 1) throw fsError(44);
+        return winner.toString("hex");
+      }
+      throw fsError(45);
+    });
+    expect(await __test.keyFromMacKeychain({
+      account: "invented-user",
+      security,
+      random: () => Buffer.alloc(32, 0x56),
+    })).toEqual(winner);
+    expect(finds).toBe(2);
+  });
+
+  it("escapes backslashes in a Keychain account", async () => {
+    let command;
+    const security = vi.fn(async (args, options = {}) => {
+      if (args[0] === "find-generic-password") throw fsError(44);
+      command = options.stdin;
+      return "";
+    });
+    await __test.keyFromMacKeychain({
+      account: "invented\\account",
+      security,
+      random: () => Buffer.alloc(32, 0x57),
+    });
+    expect(command).toContain('-a "invented\\\\account"');
+  });
+
+  it("generates a 32-byte Keychain key", async () => {
+    const security = vi.fn(async (args) => {
+      if (args[0] === "find-generic-password") throw fsError(44);
+      return "";
+    });
+    const key = await __test.keyFromMacKeychain({
+      account: "invented-user",
+      security,
+      random: (size) => Buffer.alloc(size, 0x58),
+    });
+    expect(key).toHaveLength(32);
+  });
+
+  it("recognizes a missing Keychain item reported only on stderr", async () => {
+    const security = vi.fn(async () => { throw Object.assign(new Error("lookup failed"), { stderr: "errSecItemNotFound" }); });
+    expect(await __test.readMacKey("invented-user", security)).toBe(null);
+  });
+
   it("creates a DPAPI key only when its file is confirmed missing", async () => {
     await withTempDir(async (dir) => {
       const dpapiFile = path.join(dir, "key.dpapi");
@@ -309,9 +397,102 @@ describe("key provider fail-closed behavior", () => {
       .rejects.toThrow(/decrypted DPAPI.*not a 32-byte hex key.*refusing/i);
     expect(write).not.toHaveBeenCalled();
   });
+
+  it("generates a 32-byte DPAPI key", async () => {
+    const read = vi.fn(async () => { throw fsError("ENOENT"); });
+    const key = await __test.keyFromWindowsDpapi({
+      dpapiFile: "/invented/key.dpapi",
+      read,
+      powershellStdin: async () => Buffer.from("invented-protected-key").toString("base64"),
+      publish: async () => ({ created: true }),
+      random: (size) => Buffer.alloc(size, 0x59),
+    });
+    expect(key).toHaveLength(32);
+  });
+
+  it("uses a DPAPI winner after either publication race result", async () => {
+    const winner = Buffer.alloc(32, 0x5a);
+    for (const publish of [
+      async () => { throw fsError("EEXIST"); },
+      async () => ({ created: false }),
+    ]) {
+      let reads = 0;
+      const read = vi.fn(async () => {
+        if (++reads === 1) throw fsError("ENOENT");
+        return Buffer.from("invented-protected-key").toString("base64");
+      });
+      expect(await __test.keyFromWindowsDpapi({
+        dpapiFile: "/invented/key.dpapi",
+        read,
+        powershell: async () => winner.toString("hex"),
+        powershellStdin: async () => Buffer.from("invented-new-key").toString("base64"),
+        publish,
+        random: () => Buffer.alloc(32, 0x5b),
+      })).toEqual(winner);
+      expect(reads).toBe(2);
+    }
+  });
 });
 
 describe("durable key-file creation", () => {
+  it("removes an owned temp when writing fails after creation", async () => {
+    const removeFile = vi.fn(async () => {});
+    const handle = {
+      writeFile: async () => { throw fsError("EIO", "write failed"); },
+      close: async () => {},
+    };
+    await expect(__test.durablePublishFileExclusive(
+      "/invented/key",
+      "invented-key",
+      { flag: "wx" },
+      {
+        platform: "win32",
+        tokenFactory: () => "owned-temp",
+        openFile: async () => handle,
+        removeFile,
+      }
+    )).rejects.toThrow(/write failed/);
+    expect(removeFile).toHaveBeenCalledOnce();
+  });
+
+  it("ignores an already-removed owned temp", async () => {
+    const result = await __test.durablePublishFileExclusive(
+      "/invented/key",
+      "invented-key",
+      {},
+      {
+        platform: "win32",
+        tokenFactory: () => "removed-temp",
+        write: async (_file, _data, _options, { onCreated }) => onCreated(),
+        linkFile: async () => {},
+        removeFile: async () => { throw fsError("ENOENT"); },
+      }
+    );
+    expect(result).toEqual({ created: true });
+  });
+
+  it("syncs the parent after removing an owned temp", async () => {
+    let syncs = 0;
+    const openFile = async () => ({
+      sync: async () => { syncs++; },
+      close: async () => {},
+    });
+    await __test.durablePublishFileExclusive(
+      "/invented/key",
+      "invented-key",
+      {},
+      {
+        platform: "linux",
+        tokenFactory: () => "synced-temp",
+        openFile,
+        write: async (_file, _data, _options, { onCreated }) => onCreated(),
+        linkFile: async () => {},
+        removeFile: async () => {},
+      }
+    );
+    expect(syncs).toBe(2);
+  });
+
   it("still publishes and cleans its temp without directory handles on Windows", async () => {
     const events = [];
     const openFile = vi.fn();

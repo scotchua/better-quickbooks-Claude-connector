@@ -28,6 +28,17 @@ describe("matchTransactions", () => {
     );
   });
 
+  it("leaves a row outside the requested date tolerance unmatched", () => {
+    const out = matchTransactions(
+      [{ date: "2028-04-10", amount: 37.25 }],
+      [{ id: "lantern-1", date: "2028-04-13", amount: 37.25 }],
+      { toleranceDays: 2 }
+    );
+    expect(out.matched).toEqual([]);
+    expect(out.statement_only).toHaveLength(1);
+    expect(out.register_only).toHaveLength(1);
+  });
+
   it("matches on amount within the date tolerance", () => {
     const out = matchTransactions(stmt, reg, { toleranceDays: 2 });
     expect(out.matched).toHaveLength(1);
@@ -122,6 +133,22 @@ describe("matchTransactions", () => {
 });
 
 describe("findDuplicateGroups", () => {
+  it("includes rows exactly on the requested date window boundary", () => {
+    const groups = findDuplicateGroups([
+      { id: "cedar-1", party: "Cedar Glass", amount: 83.42, date: "2028-05-10" },
+      { id: "cedar-2", party: "Cedar Glass", amount: 83.42, date: "2028-05-13" },
+    ], { dateWindowDays: 3 });
+    expect(groups.map((group) => group.map((row) => row.id))).toEqual([["cedar-1", "cedar-2"]]);
+  });
+
+  it("uses a three-day default date window", () => {
+    const groups = findDuplicateGroups([
+      { id: "maple-1", party: "Maple Lantern", amount: 64.18, date: "2028-06-01" },
+      { id: "maple-2", party: "Maple Lantern", amount: 64.18, date: "2028-06-05" },
+    ]);
+    expect(groups).toEqual([]);
+  });
+
   it("clusters same party + amount within the date window", () => {
     const rows = [
       { id: "1", party: "Rent Co", amount: 1500, date: "2026-07-01" },
@@ -180,6 +207,14 @@ const register = (rows) => bankRegisterFromGl(glFlatten(flattenReport(bankGl(row
 const OPENING = glRow({ date: "Beginning Balance", type: "", balance: "1000.00" });
 
 describe("bankRegisterFromGl", () => {
+  it("keeps the transaction name and running balance", () => {
+    const reg = bankRegisterFromGl([
+      { date: "Opening Balance", amount: null, balance: 250 },
+      { date: "2028-07-02", id: "harbor-1", name: "Fable Harbor", amount: -17.25, balance: 232.75 },
+    ]);
+    expect(reg.transactions[0]).toMatchObject({ name: "Fable Harbor", balance: 232.75 });
+  });
+
   it("pulls the opening balance out of the label row and keeps it out of the transactions", () => {
     const reg = register([OPENING, glRow({ date: "2026-07-02", type: "Deposit", id: "11", amount: "500.00", balance: "1500.00" })]);
     expect(reg.beginning_balance).toBe(1000);
@@ -226,6 +261,52 @@ describe("bankRegisterFromGl", () => {
 });
 
 describe("bankTieOut", () => {
+  it("uses the magnitude of signed unmatched amounts", () => {
+    const tie = bankTieOut({
+      statementEndingBalance: 300,
+      glEndingBalance: 275,
+      outflows: { register_only: [{ amount: -25 }] },
+    });
+    expect(tie.outstanding_items).toEqual({ count: 1, total: 25 });
+    expect(tie.adjusted_bank_balance).toBe(275);
+    expect(tie.balanced).toBe(true);
+  });
+
+  it("adds deposits in transit to the statement balance and returns the supplied balance", () => {
+    const tie = bankTieOut({
+      statementEndingBalance: 410,
+      glEndingBalance: 435,
+      inflows: { register_only: [{ amount: 25 }] },
+    });
+    expect(tie.statement_ending_balance).toBe(410);
+    expect(tie.deposits_in_transit).toEqual({ count: 1, total: 25 });
+    expect(tie.adjusted_bank_balance).toBe(435);
+    expect(tie.balanced).toBe(true);
+  });
+
+  it("counts and adds unrecorded receipts on the book side", () => {
+    const tie = bankTieOut({
+      statementEndingBalance: 529,
+      glEndingBalance: 500,
+      inflows: { statement_only: [{ amount: 12 }, { amount: 17 }] },
+    });
+    expect(tie.unrecorded_receipts).toEqual({ count: 2, total: 29 });
+    expect(tie.adjusted_book_balance).toBe(529);
+    expect(tie.balanced).toBe(true);
+  });
+
+  it("does not call a one-cent difference balanced", () => {
+    const tie = bankTieOut({ statementEndingBalance: 700.01, glEndingBalance: 700 });
+    expect(tie.difference).toBe(0.01);
+    expect(tie.balanced).toBe(false);
+  });
+
+  it("retains the book closing balance when the statement balance is unavailable", () => {
+    const tie = bankTieOut({ glEndingBalance: 812.34 });
+    expect(tie.book_ending_balance).toBe(812.34);
+    expect(tie.adjusted_book_balance).toBeNull();
+  });
+
   // Books hold a deposit, a check and a transfer. The statement shows only the
   // first two, so the transfer is still outstanding at the cutoff.
   const reg = register([

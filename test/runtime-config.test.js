@@ -15,6 +15,12 @@ function startWith(overrides) {
 }
 
 describe("bounded runtime configuration", () => {
+  it("rejects a zero inline report limit", () => {
+    const result = startWith({ QBO_REPORT_MAX_INLINE_CHARS: "0" });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/QBO_REPORT_MAX_INLINE_CHARS must be a positive safe integer/);
+  });
+
   it.each([
     ["QBO_REPORT_MAX_INLINE_CHARS", "Infinity", "positive safe integer"],
     ["QBO_REPORT_MAX_INLINE_CHARS", "-1", "positive safe integer"],
