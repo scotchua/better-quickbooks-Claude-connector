@@ -22,7 +22,7 @@ function startServer(preload, tempDir, extraEnv = {}) {
       QBO_TOOL_PROFILE: "full",
       QBO_CLOSED_PERIOD: "block",
       QBO_TOKEN_ENCRYPTION: "off",
-      QBO_POLICY_FILE: path.join(tempDir, "no-policy.json"),
+      QBO_POLICY_FILE: path.join(tempDir, "open-policy.json"),
       QBO_AUDIT_DIR: path.join(tempDir, "audit"),
       ...extraEnv,
     },
@@ -99,6 +99,8 @@ describe("closed-period update guards", () => {
 
   beforeAll(async () => {
     tempDir = await mkdtemp(path.join(tmpdir(), "qbo-closed-period-"));
+    // An explicit empty policy file: a missing one now blocks every write.
+    await writeFile(path.join(tempDir, "open-policy.json"), "{}");
     preload = path.join(tempDir, "mock-qbo-fetch.mjs");
     await writeFile(preload, `
 const json = (body, status = 200) => new Response(JSON.stringify(body), {

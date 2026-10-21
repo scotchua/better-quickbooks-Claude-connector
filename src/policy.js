@@ -693,6 +693,15 @@ export async function checkWritePolicy(slug, body, {
   siblings = null,
   postingCreatesWithoutValidTxnDate = [],
 } = {}) {
+  // A missing file reads as "no rules" everywhere else, but it must never mean
+  // "writes allowed": a deleted or moved file would silently unlock every
+  // company. Scott ruled 2026-10-20 that a missing file blocks writes.
+  if ((await loadPolicy()) === null) {
+    throw new Error(
+      `Policy: the write-policy file ${policyPath()} is missing. Writes are blocked until it is restored ` +
+        "(from a backup beside it) or recreated."
+    );
+  }
   const pol = await policyFor(slug, { siblings });
   if (!pol || Object.keys(pol).length === 0) return;
   const label = slug || "(default)";

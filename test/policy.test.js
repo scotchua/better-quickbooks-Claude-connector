@@ -139,8 +139,17 @@ describe("policy file failure modes", () => {
     await expect(checkWritePolicy("acme", { TotalAmt: 1e9 })).resolves.toBeUndefined();
   });
 
-  it("still treats a MISSING file as no policy at all", async () => {
+  // Scott's ruling 2026-10-20: a missing file blocks writes; only an explicit
+  // empty file means "no rules".
+  it("blocks every write, body-less gate checks included, when the file is MISSING", async () => {
     process.env.QBO_POLICY_FILE = path.join(tmpdir(), "qbo-policy-does-not-exist-12345.json");
+    await expect(checkWritePolicy("acme", { TotalAmt: 1 })).rejects.toThrow(/write-policy file .* is missing/);
+    await expect(checkWritePolicy("acme", null)).rejects.toThrow(/is missing/);
+    await expect(checkWritePolicy("", null)).rejects.toThrow(/is missing/);
+  });
+
+  it("treats an explicit empty file as no rules", async () => {
+    await withRawPolicyFile("{}");
     await expect(checkWritePolicy("acme", { TotalAmt: 1e9 })).resolves.toBeUndefined();
   });
 
@@ -280,9 +289,9 @@ describe("policy file durability", () => {
 });
 
 describe("checkWritePolicy", () => {
-  it("does nothing when no policy file exists", async () => {
+  it("refuses when no policy file exists", async () => {
     process.env.QBO_POLICY_FILE = "/nonexistent/qbo-policy.json";
-    await expect(checkWritePolicy("acme", { TotalAmt: 1e9 })).resolves.toBeUndefined();
+    await expect(checkWritePolicy("acme", { TotalAmt: 1e9 })).rejects.toThrow(/is missing/);
   });
 
   it("blocks writes to read-only companies, including body-less gate checks", async () => {
