@@ -473,7 +473,7 @@ export async function policyFor(slug, { siblings = null, requireFile = false } =
   if (p === null && requireFile) {
     throw new Error(
       `Policy: the write-policy file ${policyPath()} is missing. Writes are blocked until it is restored ` +
-        "(from a backup in the policy folder, if one exists) or recreated."
+        "from a backup in the policy folder. Setting one company's rule would recreate it without the others."
     );
   }
   if (!p) return {};
