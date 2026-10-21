@@ -9,6 +9,10 @@ on:
   # a push does not appear to have triggered anything.
   workflow_dispatch:
 
+# CI only reads the repository; no job needs to write to it.
+permissions:
+  contents: read
+
 jobs:
   # Named "unit", not "test", because a matrix job reports one check per leg:
   # "unit (22)" and "unit (24)". The branch ruleset requires a single context
