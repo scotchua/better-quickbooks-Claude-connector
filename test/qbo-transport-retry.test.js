@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { qboRequest, saveTokens, __test } from "../src/qbo.js";
@@ -19,7 +19,9 @@ beforeEach(async () => {
   vi.stubEnv("QBO_TOKEN_ENCRYPTION", "off");
   vi.stubEnv("QBO_AUDIT", "off");
   vi.stubEnv("QBO_AUDIT_DIR", auditDir);
-  vi.stubEnv("QBO_POLICY_FILE", path.join(auditDir, "no-policy.json"));
+  // An explicit empty policy file: a missing one now blocks every write.
+  await writeFile(path.join(auditDir, "open-policy.json"), "{}");
+  vi.stubEnv("QBO_POLICY_FILE", path.join(auditDir, "open-policy.json"));
   await saveTokens(SLUG, {
     access_token: "fresh-access",
     refresh_token: "fresh-refresh",

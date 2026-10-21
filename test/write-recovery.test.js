@@ -33,7 +33,9 @@ describe("qboRequest durable write recovery", () => {
     dir = await mkdtemp(path.join(tmpdir(), "qbo-write-recovery-"));
     process.env.QBO_AUDIT_DIR = dir;
     process.env.QBO_AUDIT = "off";
-    process.env.QBO_POLICY_FILE = path.join(dir, "missing-policy.json");
+    // An explicit empty policy file: a missing one now blocks every write.
+    process.env.QBO_POLICY_FILE = path.join(dir, "open-policy.json");
+    await writeFile(process.env.QBO_POLICY_FILE, "{}");
     process.env.QBO_TOKEN_ENCRYPTION = "off";
     const tokenStage = `${TOKEN_FILE}.${process.pid}.${randomUUID()}.tmp`;
     await writeFile(tokenStage, JSON.stringify({

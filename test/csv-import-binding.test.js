@@ -20,7 +20,7 @@ function startServer(preload, tempDir, categoryFile, writeLog) {
       QBO_TOOL_PROFILE: "full",
       QBO_TOKEN_ENCRYPTION: "off",
       QBO_CLOSED_PERIOD: "off",
-      QBO_POLICY_FILE: path.join(tempDir, "no-policy.json"),
+      QBO_POLICY_FILE: path.join(tempDir, "open-policy.json"),
       QBO_AUDIT_DIR: path.join(tempDir, "audit"),
       QBO_FILES_DIR: tempDir,
       QBO_TEST_CATEGORY_FILE: categoryFile,
@@ -93,6 +93,8 @@ describe("CSV preview plan binding", () => {
 
   beforeAll(async () => {
     tempDir = await mkdtemp(path.join(tmpdir(), "qbo-csv-preview-binding-"));
+    // An explicit empty policy file: a missing one now blocks every write.
+    await writeFile(path.join(tempDir, "open-policy.json"), "{}");
     categoryFile = path.join(tempDir, "category-id.txt");
     writeLog = path.join(tempDir, "qbo-writes.log");
     csvFile = path.join(tempDir, "bank.csv");

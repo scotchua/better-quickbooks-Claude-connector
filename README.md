@@ -227,9 +227,10 @@ QuickBooks (Intuit). That means:
   `create_invoice` and `create_bill` each issue exactly one write and support
   this recovery. Email an invoice with `send_invoice_email` afterward; create a
   missing vendor with `create_vendor` before retrying a bill.
-- **The guardrail file fails closed.** If `qbo-policy.json` is unreadable or has
-  a typo in it, the app refuses to write at all rather than treating "cannot read
-  the rules" as "there are no rules."
+- **The guardrail file fails closed.** If `qbo-policy.json` is missing, unreadable
+  or has a typo in it, the app refuses to write at all rather than treating
+  "cannot read the rules" as "there are no rules." To run with no rules on
+  purpose, use a file containing `{}`.
 - **Guardrails protect books, not labels.** Rules are written per company slug,
   but they are resolved per QuickBooks *realm*. If the same company is ever
   reachable under two slugs, every rule set on either one applies, and the

@@ -23,7 +23,7 @@ function startServer(preload, tempDir, filesDir, writeLog, profile = "full") {
       QBO_CLOSED_PERIOD: "off",
       QBO_RETRY_WRITES: "false",
       QBO_PDF_MAX_BYTES: "32",
-      QBO_POLICY_FILE: path.join(tempDir, "no-policy.json"),
+      QBO_POLICY_FILE: path.join(tempDir, "open-policy.json"),
       QBO_AUDIT_DIR: path.join(tempDir, "audit"),
       QBO_FILES_DIR: filesDir,
       QBO_TEST_WRITE_LOG: writeLog,
@@ -98,6 +98,8 @@ describe("tool ergonomics at the MCP boundary", () => {
 
   beforeAll(async () => {
     tempDir = await mkdtemp(path.join(tmpdir(), "qbo-tool-ergonomics-"));
+    // An explicit empty policy file: a missing one now blocks every write.
+    await writeFile(path.join(tempDir, "open-policy.json"), "{}");
     filesDir = path.join(tempDir, "files");
     writeLog = path.join(tempDir, "writes.jsonl");
     await mkdir(filesDir, { recursive: true });

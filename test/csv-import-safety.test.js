@@ -195,7 +195,8 @@ globalThis.fetch = async (input, init = {}) => {
     await writeFile(modeFile, mode);
     await writeFile(countFile, "0");
     await writeFile(csvFile, csv || "Date,Description,Amount\n1/2/26,Coffee Hut,-4.50\n");
-    if (policy) await writeFile(policyFile, JSON.stringify(policy));
+    // An explicit empty policy file: a missing one now blocks every write.
+    await writeFile(policyFile, JSON.stringify(policy ?? {}));
     return {
       csvFile,
       writeLog,
