@@ -148,6 +148,13 @@ describe("policy file failure modes", () => {
     await expect(checkWritePolicy("", null)).rejects.toThrow(/is missing/);
   });
 
+  it("refuses a file deleted after an earlier check passed (one load per gate)", async () => {
+    const file = await withRawPolicyFile("{}");
+    await expect(checkWritePolicy("acme", { TotalAmt: 1 })).resolves.toBeUndefined();
+    await rm(file);
+    await expect(checkWritePolicy("acme", { TotalAmt: 1 })).rejects.toThrow(/is missing/);
+  });
+
   it("treats an explicit empty file as no rules", async () => {
     await withRawPolicyFile("{}");
     await expect(checkWritePolicy("acme", { TotalAmt: 1e9 })).resolves.toBeUndefined();

@@ -463,9 +463,19 @@ function mergeStrictest(into, rules) {
  * `siblings` is injectable so tests and callers that already hold the company
  * list do not have to re-scan the token directory.
  */
-export async function policyFor(slug, { siblings = null } = {}) {
+export async function policyFor(slug, { siblings = null, requireFile = false } = {}) {
   assertMergeRulesComplete();
   const p = await loadPolicy();
+  // A missing file reads as "no rules" for display, but it must never mean
+  // "writes allowed": a deleted or moved file would silently unlock every
+  // company (Scott, 2026-10-20). The write gate checks the same single load it
+  // evaluates, so a file deleted mid-check cannot fall through to {}.
+  if (p === null && requireFile) {
+    throw new Error(
+      `Policy: the write-policy file ${policyPath()} is missing. Writes are blocked until it is restored ` +
+        "(from a backup in the policy folder, if one exists) or recreated."
+    );
+  }
   if (!p) return {};
   const defaults = p.defaults || {};
   const companies = p.companies || {};
@@ -693,16 +703,7 @@ export async function checkWritePolicy(slug, body, {
   siblings = null,
   postingCreatesWithoutValidTxnDate = [],
 } = {}) {
-  // A missing file reads as "no rules" everywhere else, but it must never mean
-  // "writes allowed": a deleted or moved file would silently unlock every
-  // company. Scott ruled 2026-10-20 that a missing file blocks writes.
-  if ((await loadPolicy()) === null) {
-    throw new Error(
-      `Policy: the write-policy file ${policyPath()} is missing. Writes are blocked until it is restored ` +
-        "(from a backup beside it) or recreated."
-    );
-  }
-  const pol = await policyFor(slug, { siblings });
+  const pol = await policyFor(slug, { siblings, requireFile: true });
   if (!pol || Object.keys(pol).length === 0) return;
   const label = slug || "(default)";
   if (pol.read_only) {
