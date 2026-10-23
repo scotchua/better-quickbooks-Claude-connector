@@ -352,6 +352,29 @@ describe("checkWritePolicy", () => {
     }
   });
 
+  it("refuses to recreate a missing policy file when backups exist beside it", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "qbo-policy-lost-"));
+    const file = path.join(dir, "qbo-policy.json");
+    process.env.QBO_POLICY_FILE = file;
+    const backup = `${file}.bak-20261020000000-1-x`;
+    await writeFile(backup, JSON.stringify({ companies: { beta: { read_only: true } } }));
+
+    await expect(setCompanyPolicy("acme", { read_only: true })).rejects.toThrow(/missing but backups exist.*bak-20261020000000-1-x/);
+    expect(await readdir(dir)).toEqual([path.basename(backup)]);
+  });
+
+  it("still creates the file on first setup when only unrelated files sit beside it", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "qbo-policy-first-"));
+    const file = path.join(dir, "qbo-policy.json");
+    process.env.QBO_POLICY_FILE = file;
+    // Not this file's backups: another file's, and a subfolder named like one.
+    await writeFile(path.join(dir, "other.json.bak-1"), "{}");
+    await mkdir(`${file}.bak-dir`);
+
+    await setCompanyPolicy("acme", { read_only: true });
+    expect(JSON.parse(await readFile(file, "utf8")).companies.acme).toEqual({ read_only: true });
+  });
+
   it("keeps only the newest backups after each write", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "qbo-policy-prune-"));
     const file = path.join(dir, "qbo-policy.json");

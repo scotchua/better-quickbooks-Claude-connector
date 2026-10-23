@@ -300,20 +300,38 @@ export function policyPath(env = process.env) {
 // a failed prune never fails the write that preceded it.
 export const KEEP_POLICY_BACKUPS = 30;
 
-export async function prunePolicyBackups(p, keep = KEEP_POLICY_BACKUPS) {
+// The policy file's own backups (regular files only), newest first. Equal
+// times fall back to the name, whose timestamp prefix sorts chronologically,
+// so the result never depends on directory order.
+async function listPolicyBackups(p) {
   const dir = path.dirname(p);
   const prefix = `${path.basename(p)}.bak-`;
+  const found = [];
+  for (const name of await readdir(dir)) {
+    if (!name.startsWith(prefix)) continue;
+    const file = path.join(dir, name);
+    const info = await lstat(file);
+    if (info.isFile()) found.push({ file, mtime: info.mtimeMs });
+  }
+  found.sort((a, b) => b.mtime - a.mtime || (a.file < b.file ? 1 : a.file > b.file ? -1 : 0));
+  return found;
+}
+
+// Newest backup's path, or null when there is none. A folder that cannot be
+// listed fails the caller rather than passing as "no backups".
+async function newestPolicyBackup(p) {
   try {
-    const found = [];
-    for (const name of await readdir(dir)) {
-      if (!name.startsWith(prefix)) continue;
-      const file = path.join(dir, name);
-      const info = await lstat(file);
-      if (info.isFile()) found.push({ file, mtime: info.mtimeMs });
-    }
-    // Newest first; equal times fall back to the name, whose timestamp prefix
-    // sorts chronologically, so the result never depends on directory order.
-    found.sort((a, b) => b.mtime - a.mtime || (a.file < b.file ? 1 : a.file > b.file ? -1 : 0));
+    return (await listPolicyBackups(p))[0]?.file ?? null;
+  } catch (e) {
+    if (e.code === "ENOENT") return null;
+    throw new Error(`Could not check ${path.dirname(p)} for policy backups (${e.message}); refusing to create a new policy file.`, { cause: e });
+  }
+}
+
+export async function prunePolicyBackups(p, keep = KEEP_POLICY_BACKUPS) {
+  const dir = path.dirname(p);
+  try {
+    const found = await listPolicyBackups(p);
     for (const { file } of found.slice(keep)) await unlink(file);
   } catch (e) {
     console.error("[qbo-policy]", `could not prune old policy backups in ${dir} (${e.message}); the write itself succeeded.`);
@@ -607,6 +625,16 @@ async function setCompanyPolicyUnlocked(slug, { read_only, max_write_amount, min
     if (e.code !== "ENOENT") {
       throw new Error(
         `${p} is not valid JSON (${e.message}). Fix or move it by hand; refusing to overwrite rules that may be protecting client books.`
+      );
+    }
+    // A missing file with backups beside it was lost, not never made. Writing
+    // one company's rule now would recreate it without every other company's.
+    // With no backups this is first-time setup, which must keep working.
+    const newest = await newestPolicyBackup(p);
+    if (newest) {
+      throw new Error(
+        `Policy: the write-policy file ${p} is missing but backups exist (newest: ${path.basename(newest)}). ` +
+          "Restore it from a backup in the policy folder first; setting one company's rule would recreate it without the others."
       );
     }
   }
