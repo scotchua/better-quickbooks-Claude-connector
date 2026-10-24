@@ -303,14 +303,21 @@ export const KEEP_POLICY_BACKUPS = 30;
 // The policy file's own backups (regular files only), newest first. Equal
 // times fall back to the name, whose timestamp prefix sorts chronologically,
 // so the result never depends on directory order.
-async function listPolicyBackups(p) {
+async function listPolicyBackups(p, { lstatFn = lstat } = {}) {
   const dir = path.dirname(p);
   const prefix = `${path.basename(p)}.bak-`;
   const found = [];
   for (const name of await readdir(dir)) {
     if (!name.startsWith(prefix)) continue;
     const file = path.join(dir, name);
-    const info = await lstat(file);
+    let info;
+    try {
+      info = await lstatFn(file);
+    } catch (e) {
+      // Removed between the listing and this look; the rest still count.
+      if (e.code === "ENOENT") continue;
+      throw e;
+    }
     if (info.isFile()) found.push({ file, mtime: info.mtimeMs });
   }
   found.sort((a, b) => b.mtime - a.mtime || (a.file < b.file ? 1 : a.file > b.file ? -1 : 0));
@@ -320,12 +327,15 @@ async function listPolicyBackups(p) {
 // Newest backup's path, or null when there is none. A folder that cannot be
 // listed fails the caller rather than passing as "no backups".
 async function newestPolicyBackup(p) {
+  let found;
   try {
-    return (await listPolicyBackups(p))[0]?.file ?? null;
+    found = await listPolicyBackups(p);
   } catch (e) {
-    if (e.code === "ENOENT") return null;
+    // Only the folder itself being absent means "no backups".
+    if (e.code === "ENOENT" && e.path === path.dirname(p)) return null;
     throw new Error(`Could not check ${path.dirname(p)} for policy backups (${e.message}); refusing to create a new policy file.`, { cause: e });
   }
+  return found[0]?.file ?? null;
 }
 
 export async function prunePolicyBackups(p, keep = KEEP_POLICY_BACKUPS) {
@@ -627,9 +637,11 @@ async function setCompanyPolicyUnlocked(slug, { read_only, max_write_amount, min
         `${p} is not valid JSON (${e.message}). Fix or move it by hand; refusing to overwrite rules that may be protecting client books.`
       );
     }
-    // A missing file with backups beside it was lost, not never made. Writing
-    // one company's rule now would recreate it without every other company's.
-    // With no backups this is first-time setup, which must keep working.
+    // Backups beside a missing file are evidence it was in use and has gone.
+    // Writing one company's rule now would recreate it without every other
+    // company's. No backups is treated as first-time setup, which must keep
+    // working. That is a heuristic: a file lost before its first change, or
+    // lost together with its backups, still gets recreated.
     const newest = await newestPolicyBackup(p);
     if (newest) {
       throw new Error(
@@ -717,6 +729,7 @@ export function setCompanyPolicy(slug, patch = {}) {
 // Narrow hooks for focused lock tests. Production callers should use
 // setCompanyPolicy so the read-modify-write operation cannot escape the lock.
 export const __test = {
+  listPolicyBackups,
   durableAtomicReplace,
   durableCreateFile,
   fsyncParentDirectory,

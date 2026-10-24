@@ -363,6 +363,41 @@ describe("checkWritePolicy", () => {
     expect(await readdir(dir)).toEqual([path.basename(backup)]);
   });
 
+  it("keeps scanning when a backup vanishes between the listing and its check", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "qbo-policy-vanish-"));
+    const file = path.join(dir, "qbo-policy.json");
+    const gone = `${file}.bak-20261019000000-1-gone`;
+    const kept = `${file}.bak-20261020000000-1-kept`;
+    await writeFile(gone, "{}");
+    await writeFile(kept, "{}");
+    // Removed by someone else after readdir listed it, before lstat looked.
+    const lstatFn = async (f) => {
+      if (f === gone) {
+        await rm(gone);
+        throw Object.assign(new Error(`ENOENT: ${f}`), { code: "ENOENT", path: f });
+      }
+      return stat(f);
+    };
+    const found = await __test.listPolicyBackups(file, { lstatFn });
+    expect(found.map((b) => b.file)).toEqual([kept]);
+  });
+
+  it("refuses to create the file when the policy folder cannot be listed", async () => {
+    if (process.platform === "win32" || process.getuid?.() === 0) return;
+    const dir = await mkdtemp(path.join(tmpdir(), "qbo-policy-nolist-"));
+    const file = path.join(dir, "qbo-policy.json");
+    process.env.QBO_POLICY_FILE = file;
+    await chmod(dir, 0o300); // write and enter, but not list
+    try {
+      // The lock setup refuses first today; the backup check is the second
+      // layer. Either way nothing may be created without the listing.
+      await expect(setCompanyPolicy("acme", { read_only: true })).rejects.toThrow();
+    } finally {
+      await chmod(dir, 0o700);
+    }
+    expect(await readdir(dir)).not.toContain("qbo-policy.json");
+  });
+
   it("still creates the file on first setup when only unrelated files sit beside it", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "qbo-policy-first-"));
     const file = path.join(dir, "qbo-policy.json");
