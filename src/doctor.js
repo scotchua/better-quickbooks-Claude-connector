@@ -193,7 +193,8 @@ try {
   add("ok", "Write policy", `${configuredPolicyPath} is valid.`);
 } catch (e) {
   if (e.code === "ENOENT") {
-    add("warn", "Write policy", `No policy file is active at ${configuredPolicyPath}; only the global safety gates apply.`);
+    add("warn", "Write policy", `No policy file is active at ${configuredPolicyPath}; writes are blocked until it exists. ` +
+      "For no per-company rules, create it containing {}.");
   } else {
     add("error", "Write policy", `${configuredPolicyPath} is invalid (${e.message}).`);
   }

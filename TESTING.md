@@ -213,7 +213,7 @@ Do this on the firm's own books first, never a client's.
    `npm run connect:playground -- firm-pilot`. Production does not use the
    localhost callback. The optional alternative is the self-hosted HTTPS catcher
    documented in `README.md`.
-2. **Start read-only.** Put the company in `qbo-policy.json` with
+2. **Start read-only.** Put the company in `policy/qbo-policy.json` with
    `read_only: true` before doing anything else. Then exercise reports,
    searches, `reconcile_bank_csv`, and `get_general_ledger_flat` freely with
    zero write risk while you judge the quality of what comes back.

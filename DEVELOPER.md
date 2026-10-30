@@ -169,7 +169,7 @@ report them and support migration to the unified entry.
 
 ## Tool catalog (full profile)
 
-As measured on 2026-09-04 by `node scripts/tool-count.js`, the full profile
+As measured on 2026-10-29 by `node scripts/tool-count.js`, the full profile
 exposes 118 tools. The script asks the running MCP server for `tools/list` and
 prints the sorted names so this catalog can be regenerated.
 
@@ -374,7 +374,7 @@ harmless would bypass amount, source-period, and closed-book checks.
   are skipped, and interrupted rows are healed only when their QBO memo marker
   is found. An absent marker causes a manual-reconciliation refusal instead of
   a second POST, because query absence is not durable proof of non-creation.
-- **Per-company policies** (optional `policy/qbo-policy.json`, see
+- **Per-company policies** (`policy/qbo-policy.json`, required for any write; `{}` means no rules; see
   `qbo-policy.example.json`; `QBO_POLICY_FILE` overrides the path): `read_only`
   companies, `max_write_amount` ceilings, and a `min_txn_date` floor, enforced
   centrally at the API layer so every write tool (including `api_request`)

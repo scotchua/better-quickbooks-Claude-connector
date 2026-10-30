@@ -43,7 +43,7 @@ work rather than a single-business dashboard:
   available in chat under the `admin` profile; real companies use Intuit's
   hosted OAuth Playground or the optional self-hosted HTTPS catcher flow.
 
-As measured on 2026-09-04 by `node scripts/tool-count.js`, the full profile
+As measured on 2026-10-29 by `node scripts/tool-count.js`, the full profile
 exposes 118 tools. The script asks the running MCP server for `tools/list` and
 prints the sorted names so the documentation can be regenerated.
 
@@ -227,7 +227,7 @@ QuickBooks (Intuit). That means:
   `create_invoice` and `create_bill` each issue exactly one write and support
   this recovery. Email an invoice with `send_invoice_email` afterward; create a
   missing vendor with `create_vendor` before retrying a bill.
-- **The guardrail file fails closed.** If `qbo-policy.json` is missing, unreadable
+- **The guardrail file fails closed.** If `policy/qbo-policy.json` is missing, unreadable
   or has a typo in it, the app refuses to write at all rather than treating
   "cannot read the rules" as "there are no rules." To run with no rules on
   purpose, use a file containing `{}`. Setting a company's rule will not
@@ -344,6 +344,24 @@ While you are in there, find the line `# QBO_FILES_DIR=~/Claude`, remove the
 leading `# `, and set it to the folder where your client files live. This fences
 every file the app reads or writes into that one folder, and attaching documents
 to QuickBooks records will not work without it. Save and close the window.
+
+Then create the guardrail file. The app refuses every write until
+`policy/qbo-policy.json` exists, so a missing file can never mean "no rules".
+Start with an empty rule set. These commands only create the file if it is not
+already there, so running them again never erases existing rules:
+
+Mac:
+```bash
+mkdir -p policy && [ -e policy/qbo-policy.json ] || echo '{}' > policy/qbo-policy.json
+```
+Windows (PowerShell):
+```powershell
+New-Item -ItemType Directory -Force policy | Out-Null; if (-not (Test-Path policy\qbo-policy.json)) { Set-Content policy\qbo-policy.json '{}' }
+```
+If you set `QBO_POLICY_FILE` in `.env`, the app uses that path instead; create
+the file there. `npm run doctor` prints the path it is checking.
+Add per-company rules later (read-only clients, amount ceilings, a date floor)
+by asking Claude, or by following `qbo-policy.example.json`.
 
 Run the local diagnostic before authorizing anything:
 
@@ -497,14 +515,17 @@ environment and returned realm still match the slug already on disk.
 
 ## Known limitations of the QuickBooks API
 
-- The API exposes no merge mechanism for name-list records. (P21, 2026-09-03; `p21-2026-09-03.json`)
-- Updating an existing account's `AccountType` is accepted but silently ignored. (P17, 2026-09-02; `p17-2026-09-02.json`)
-- Deactivating an account or customer renames it with a `(deleted)` suffix; reactivation restores the name. (P3, 2026-08-05, and P8, 2026-08-07; `p3-2026-08-05.json`, `p8-2026-08-07.json`)
-- Preferences are field-specific: `CustomerTerminology` and `ClassTrackingPerTxn` write and reverse, while `UseAccountNumbers`, `TrackDepartments`, and `FirstMonthOfFiscalYear` are accepted but silently ignored. (P18 follow-up bisect, 2026-09-03; `review/SUITE-AUDIT-2026-09-04.md`)
-- A report can return HTTP 200 for an `as_of` request while reporting a different period, and CDC silently limits history to about 30 days even when an older `changedSince` is accepted. (2026-08-30 `docs/audits/review-service-audit-2026-08-30.md`; 2026-08-26 `measurements/history_check-2026-08-26.json`)
-- An incomplete `Line` array in an otherwise valid sparse transaction update replaces the complete array and deletes omitted lines. (P9, 2026-08-23; `p9-2026-08-23.json`)
-- Void behavior has been measured only for invoices. (P20, 2026-09-02; `p20-2026-09-02.json`)
-- Full `TxnDate` updates worked across all six tested transaction classes, while sparse-update support varied by class. (P19, 2026-09-03; `p19-2026-09-03.json`)
+Each item below was measured against the live API on the date shown. The raw
+measurement files are kept private because they carry company identifiers.
+
+- The API exposes no merge mechanism for name-list records. (2026-09-03)
+- Updating an existing account's `AccountType` is accepted but silently ignored. (2026-09-02)
+- Deactivating an account or customer renames it with a `(deleted)` suffix; reactivation restores the name. (2026-08-05 and 2026-08-07)
+- Preferences are field-specific: `CustomerTerminology` and `ClassTrackingPerTxn` write and reverse, while `UseAccountNumbers`, `TrackDepartments`, and `FirstMonthOfFiscalYear` are accepted but silently ignored. (2026-09-03)
+- A report can return HTTP 200 for an `as_of` request while reporting a different period, and CDC silently limits history to about 30 days even when an older `changedSince` is accepted. (2026-08-30 and 2026-08-26)
+- An incomplete `Line` array in an otherwise valid sparse transaction update replaces the complete array and deletes omitted lines. (2026-08-23)
+- Void behavior has been measured only for invoices. (2026-09-02)
+- Full `TxnDate` updates worked across all six tested transaction classes, while sparse-update support varied by class. (2026-09-03)
 
 ## Help & support
 
