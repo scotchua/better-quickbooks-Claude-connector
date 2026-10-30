@@ -106,6 +106,33 @@ describe("planImport", () => {
     const plan = planImport(rows);
     expect(plan.outflows).toEqual([{ row: 2, date: "2026-01-02", description: "RENT", amount: 1500 }]);
     expect(plan.inflows[0].amount).toBe(75);
+    expect(plan.errors).toHaveLength(0);
+  });
+  it("reports a malformed Debit even when Credit is valid", () => {
+    const rows = parseCSV("Date,Description,Debit,Credit\n1/2/26,INVENTED REFUND,wrong,75");
+    const plan = planImport(rows);
+    expect(plan.errors).toEqual([{ row: 2, reason: 'Unreadable Debit amount "wrong"' }]);
+    expect(plan.outflows).toHaveLength(0);
+    expect(plan.inflows).toHaveLength(0);
+  });
+  it("treats placeholder text in the unused Debit or Credit cell as empty", () => {
+    const rows = parseCSV("Date,Description,Debit,Credit\n1/2/26,INVENTED RENT,15,-\n1/3/26,INVENTED REFUND,--,8\n1/4/26,INVENTED FEE,2,N/A\n1/5/26,INVENTED DEPOSIT,n/a,4");
+    const plan = planImport(rows);
+    expect(plan.errors).toHaveLength(0);
+    expect(plan.outflows.map((o) => o.amount)).toEqual([15, 2]);
+    expect(plan.inflows.map((o) => o.amount)).toEqual([8, 4]);
+  });
+  it("reports a row whose Debit and Credit both hold placeholders", () => {
+    const rows = parseCSV("Date,Description,Debit,Credit\n1/2/26,INVENTED NOTHING,-,N/A");
+    const plan = planImport(rows);
+    expect(plan.errors).toEqual([{ row: 2, reason: "No amount in Debit or Credit column" }]);
+  });
+  it("reports a malformed Credit even when Debit is valid", () => {
+    const rows = parseCSV("Date,Description,Debit,Credit\n1/2/26,INVENTED CHARGE,25,wrong");
+    const plan = planImport(rows);
+    expect(plan.errors).toEqual([{ row: 2, reason: 'Unreadable Credit amount "wrong"' }]);
+    expect(plan.outflows).toHaveLength(0);
+    expect(plan.inflows).toHaveLength(0);
   });
   it("reports rows with amounts in both Debit and Credit without changing single-sided rows", () => {
     const rows = parseCSV("Date,Description,Debit,Credit\n1/2/26,RENT,10,\n1/3/26,REFUND,,8\n1/4/26,AMBIGUOUS,10,8");
