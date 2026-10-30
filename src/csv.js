@@ -48,6 +48,14 @@ export function parseCSV(text) {
 
 // Signed amount: handles $, thousands separators, leading/trailing minus, and
 // accounting-style parentheses negatives. Returns NaN when not a number.
+// Banks fill the unused Debit or Credit cell with blanks or placeholders such
+// as "-", "--" or "N/A". Those read as empty; any other unreadable text is a
+// row error.
+function isEmptyAmountCell(raw) {
+  const s = String(raw ?? "").trim();
+  return s === "" || /^-+$/.test(s) || /^n\/?a$/i.test(s);
+}
+
 export function parseAmount(raw) {
   let s = String(raw ?? "").trim();
   if (s === "") return NaN;
@@ -130,8 +138,18 @@ export function planImport(rows, { amountConvention = "negative_out" } = {}) {
 
     let signed; // negative = money out
     if (hasDebitCredit) {
-      const debit = parseAmount(r[debitIdx]);
-      const credit = parseAmount(r[creditIdx]);
+      const debitRaw = r[debitIdx] ?? "";
+      const creditRaw = r[creditIdx] ?? "";
+      const debit = parseAmount(debitRaw);
+      const credit = parseAmount(creditRaw);
+      if (!isEmptyAmountCell(debitRaw) && Number.isNaN(debit)) {
+        errors.push({ row: i + 1, reason: `Unreadable Debit amount "${debitRaw}"` });
+        continue;
+      }
+      if (!isEmptyAmountCell(creditRaw) && Number.isNaN(credit)) {
+        errors.push({ row: i + 1, reason: `Unreadable Credit amount "${creditRaw}"` });
+        continue;
+      }
       if (Number.isNaN(debit) && Number.isNaN(credit)) {
         errors.push({ row: i + 1, reason: "No amount in Debit or Credit column" });
         continue;
