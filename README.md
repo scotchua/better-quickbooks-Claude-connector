@@ -347,16 +347,19 @@ to QuickBooks records will not work without it. Save and close the window.
 
 Then create the guardrail file. The app refuses every write until
 `policy/qbo-policy.json` exists, so a missing file can never mean "no rules".
-Start with an empty rule set:
+Start with an empty rule set. These commands only create the file if it is not
+already there, so running them again never erases existing rules:
 
 Mac:
 ```bash
-mkdir -p policy && echo '{}' > policy/qbo-policy.json
+mkdir -p policy && [ -e policy/qbo-policy.json ] || echo '{}' > policy/qbo-policy.json
 ```
 Windows (PowerShell):
 ```powershell
-New-Item -ItemType Directory -Force policy; Set-Content policy\qbo-policy.json '{}'
+New-Item -ItemType Directory -Force policy | Out-Null; if (-not (Test-Path policy\qbo-policy.json)) { Set-Content policy\qbo-policy.json '{}' }
 ```
+If you set `QBO_POLICY_FILE` in `.env`, the app uses that path instead; create
+the file there. `npm run doctor` prints the path it is checking.
 Add per-company rules later (read-only clients, amount ceilings, a date floor)
 by asking Claude, or by following `qbo-policy.example.json`.
 

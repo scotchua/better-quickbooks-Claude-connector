@@ -93,8 +93,9 @@ Claude confirms the keys are in place **without printing your secret** on screen
 > folder. Imports, reconciliation, report/PDF output, attachment downloads, and
 > document uploads are refused until this fence is configured.
 
-Claude also creates the guardrail file, `policy/qbo-policy.json`, starting
-with no rules (`{}`). The app refuses every write until that file exists, so a
+Claude also creates the guardrail file, `policy/qbo-policy.json` (or the path
+set by `QBO_POLICY_FILE`, if you use one), starting with no rules (`{}`). It
+never overwrites a file that already exists. The app refuses every write until that file exists, so a
 lost or mistyped file can never be read as "no rules".
 
 Claude then runs `npm run doctor`. This is a local, secret-redacting check of
