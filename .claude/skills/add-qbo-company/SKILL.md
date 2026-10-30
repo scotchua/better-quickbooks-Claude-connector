@@ -84,6 +84,10 @@ npm run doctor
 ```
 `doctor` must not print secrets or contact Intuit. Resolve any credential-pair,
 policy, token-permission, or `QBO_FILES_DIR` error before continuing.
+If it warns that no policy file is active, every write is blocked: on a first
+install, create `policy/qbo-policy.json` containing `{}` (no rules yet). If the
+file existed before, restore the newest backup in `policy/` instead, so other
+companies' rules come back.
 If the slug already shows as authorized, stop and confirm the user intends to
 reauthorize that same realm/environment. Existing slugs require explicit
 replacement authority: add `-- --replace-existing` to the sandbox command or
@@ -221,7 +225,8 @@ is picked at runtime.
 Summarize for the user: the slug, its realmId and environment, and that they
 select it with *"work on <slug>"* (or a `company` argument on any call). If they
 added a production company, remind them those are **real** books; writes post
-for real, and per-company guardrails can be set in `qbo-policy.json`.
+for real, and per-company guardrails can be set in `policy/qbo-policy.json`
+(that file must exist for any write; `{}` means no rules).
 
 ## Related tasks
 

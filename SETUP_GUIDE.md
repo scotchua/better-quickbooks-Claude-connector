@@ -93,6 +93,10 @@ Claude confirms the keys are in place **without printing your secret** on screen
 > folder. Imports, reconciliation, report/PDF output, attachment downloads, and
 > document uploads are refused until this fence is configured.
 
+Claude also creates the guardrail file, `policy/qbo-policy.json`, starting
+with no rules (`{}`). The app refuses every write until that file exists, so a
+lost or mistyped file can never be read as "no rules".
+
 Claude then runs `npm run doctor`. This is a local, secret-redacting check of
 Node, credentials, the file fence, token permissions, policies, audit storage,
 the selected tool profile, and Claude Desktop configuration. It makes no Intuit
@@ -168,8 +172,8 @@ surface is appropriate.
 > active one covers reading, not posting), the app warns when a change lands in a
 > closed period — including edits to transactions already sitting in one — keeps a
 > durable intent before anything is sent, requires a preview before importing a bank
-> CSV, and can enforce per-company rules (like read-only clients) from a
-> `qbo-policy.json` file. When a posting date is omitted, the app warns instead
+> CSV, and can enforce per-company rules (like read-only clients) from
+> `policy/qbo-policy.json`. When a posting date is omitted, the app warns instead
 > of guessing QuickBooks' undocumented server-date timezone; closed-period
 > block mode requires the date explicitly.
 
