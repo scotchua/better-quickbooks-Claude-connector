@@ -19,6 +19,13 @@ npm install
 npm test
 ```
 
+**Needs:** Node 22 or later and Python 3 on the PATH. Python is only for
+`test/add-qbo-company-scripts.test.js`, which runs the add-qbo-company skill's
+helper scripts (standard library only, nothing to pip install). The test calls
+`python3`, or `python` on Windows; set `PYTHON` to point it elsewhere. Without
+Python, those tests fail while everything else passes, so a bare Node container
+image shows failures that are not real.
+
 **Pass:** every test file passes; use the count printed by the current run
 (the suite grows with each safety contract). This covers the security-critical logic:
 query escaping, CSV sign and date handling, the import journal's crash-window
