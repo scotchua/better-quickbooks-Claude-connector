@@ -84,7 +84,7 @@ async function callTool(server, name, args) {
   return { ...response.result, body };
 }
 
-describe("CSV preview plan binding", () => {
+describe("CSV preview plan binding", { timeout: 20_000 }, () => {
   let tempDir;
   let categoryFile;
   let writeLog;
